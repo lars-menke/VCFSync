@@ -12,6 +12,7 @@ oder als Umgebungsvariablen gesetzt:
 """
 
 import argparse
+import base64
 import os
 import re
 import sys
@@ -187,6 +188,92 @@ def extract_uid(vcard_text):
 
 
 # ---------------------------------------------------------------------------
+# Foto-Einbettung (URI -> Base64)
+# ---------------------------------------------------------------------------
+
+def unfold_vcard(text):
+    """Hebt vCard-Zeilenfaltung auf (Fortsetzungszeilen beginnen mit Space/Tab)."""
+    out = []
+    for line in text.splitlines():
+        if line[:1] in (" ", "\t") and out:
+            out[-1] += line[1:]
+        else:
+            out.append(line)
+    return out
+
+
+def fold_line(line, limit=73):
+    """Faltet eine lange vCard-Zeile (Folding nach RFC 6350: max ~75 Oktette)."""
+    if len(line) <= limit:
+        return line
+    parts = [line[:limit]]
+    rest = line[limit:]
+    while rest:
+        parts.append(" " + rest[:limit - 1])
+        rest = rest[limit - 1:]
+    return "\r\n".join(parts)
+
+
+def _photo_subtype(content_type, data):
+    """Ermittelt den Bild-Subtyp (JPEG/PNG/...) aus Content-Type oder Magic-Bytes."""
+    if content_type:
+        ct = content_type.lower()
+        if "jpeg" in ct or "jpg" in ct:
+            return "JPEG"
+        if "png" in ct:
+            return "PNG"
+        if "gif" in ct:
+            return "GIF"
+        if "webp" in ct:
+            return "WEBP"
+    if data[:3] == b"\xff\xd8\xff":
+        return "JPEG"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "PNG"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "GIF"
+    return "JPEG"  # iCloud liefert in aller Regel JPEG
+
+
+def embed_photos(session, vcard_text):
+    """
+    Ersetzt PHOTO-Verweise (PHOTO;...;VALUE=uri:https://...) durch eingebettete
+    Base64-Daten (PHOTO;ENCODING=b;TYPE=...). Gibt (vcard_text, anzahl) zurück.
+    Bei Fehlern bleibt der ursprüngliche Verweis erhalten.
+    """
+    lines = unfold_vcard(vcard_text)
+    embedded = 0
+    for idx, line in enumerate(lines):
+        if not line.upper().startswith("PHOTO"):
+            continue
+        head, sep, value = line.partition(":")
+        if not sep or not value.lower().startswith(("http://", "https://")):
+            continue  # bereits eingebettet oder kein URL-Verweis
+        try:
+            resp = session.get(value.strip(), timeout=30)
+            resp.raise_for_status()
+            data = resp.content
+            if not data:
+                continue
+        except Exception as e:
+            print(f"\n  WARNUNG: Foto konnte nicht geladen werden ({e})")
+            continue
+
+        subtype = _photo_subtype(resp.headers.get("Content-Type", ""), data)
+        b64 = base64.b64encode(data).decode("ascii")
+
+        # Parameter aus dem Kopf übernehmen, VALUE entfernen, ENCODING/TYPE setzen
+        params = [p for p in head.split(";")[1:] if not p.upper().startswith("VALUE=")]
+        params = [p for p in params if not p.upper().startswith("ENCODING=")
+                  and not p.upper().startswith("TYPE=")]
+        new_head = ";".join(["PHOTO", *params, "ENCODING=b", f"TYPE={subtype}"])
+        lines[idx] = fold_line(f"{new_head}:{b64}")
+        embedded += 1
+
+    return "\r\n".join(lines), embedded
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 
@@ -197,17 +284,26 @@ def cmd_export(args, session, addressbook_url):
     total = len(hrefs)
     print(f"{total} Kontakte gefunden.")
 
+    embed = not getattr(args, "skip_photos", False)
+    photo_count = 0
     vcards = []
     for i, (href, etag) in enumerate(hrefs, 1):
         print(f"\r  Lade {i}/{total} ...", end="", flush=True)
         try:
             vcard = fetch_vcard(session, href)
+            if embed:
+                # iCloud liefert Fotos als URL-Verweis statt eingebettet -
+                # hier werden sie nachgeladen und als Base64 eingebettet.
+                vcard, n = embed_photos(session, vcard)
+                photo_count += n
             vcards.append(vcard.strip())
         except Exception as e:
             print(f"\n  WARNUNG: {href} konnte nicht geladen werden: {e}")
         time.sleep(0.05)  # sanftes Rate-Limiting
 
     print(f"\n{len(vcards)} Kontakte geladen.")
+    if embed:
+        print(f"{photo_count} Fotos als Base64 eingebettet.")
 
     combined = "\r\n".join(vcards) + "\r\n"
     output.write_text(combined, encoding="utf-8")
@@ -336,6 +432,8 @@ def main():
     exp = sub.add_parser("export", help="Kontakte aus iCloud exportieren")
     exp.add_argument("--output", default="icloud_kontakte.vcf",
                      help="Zieldatei (Standard: icloud_kontakte.vcf)")
+    exp.add_argument("--skip-photos", action="store_true",
+                     help="Fotos nicht nachladen/einbetten (nur URL-Verweise, schneller)")
 
     imp = sub.add_parser("import", help="Bearbeitete VCF in iCloud zurückspielen")
     imp.add_argument("--input", required=True,
