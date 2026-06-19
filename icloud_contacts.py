@@ -249,14 +249,20 @@ def embed_photos(session, vcard_text):
         head, sep, value = line.partition(":")
         if not sep or not value.lower().startswith(("http://", "https://")):
             continue  # bereits eingebettet oder kein URL-Verweis
-        try:
-            resp = session.get(value.strip(), timeout=30)
-            resp.raise_for_status()
-            data = resp.content
-            if not data:
-                continue
-        except Exception as e:
-            print(f"\n  WARNUNG: Foto konnte nicht geladen werden ({e})")
+
+        data = resp = None
+        for attempt in range(3):  # kleiner Retry gegen transiente Aussetzer
+            try:
+                resp = session.get(value.strip(), timeout=30)
+                resp.raise_for_status()
+                data = resp.content
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"\n  WARNUNG: Foto konnte nicht geladen werden ({e})")
+                else:
+                    time.sleep(0.5 * (attempt + 1))
+        if not data:
             continue
 
         subtype = _photo_subtype(resp.headers.get("Content-Type", ""), data)
@@ -267,10 +273,12 @@ def embed_photos(session, vcard_text):
         params = [p for p in params if not p.upper().startswith("ENCODING=")
                   and not p.upper().startswith("TYPE=")]
         new_head = ";".join(["PHOTO", *params, "ENCODING=b", f"TYPE={subtype}"])
-        lines[idx] = fold_line(f"{new_head}:{b64}")
+        lines[idx] = f"{new_head}:{b64}"
         embedded += 1
 
-    return "\r\n".join(lines), embedded
+    # Alle Zeilen RFC-6350-konform falten (Unfold/Rejoin hätte sonst lange
+    # iCloud-Felder wie X-ADDRESSING-GRAMMAR ungefaltet gelassen).
+    return "\r\n".join(fold_line(l) for l in lines), embedded
 
 
 # ---------------------------------------------------------------------------
