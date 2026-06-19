@@ -1,0 +1,35 @@
+name: iCloud Kontakte Import
+
+on:
+  workflow_dispatch:
+    inputs:
+      vcf_content:
+        description: "VCF-Inhalt einfügen (max. 65.536 Zeichen)"
+        type: string
+        required: true
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: VCF-Inhalt in Datei schreiben
+        env:
+          VCF_CONTENT: ${{ inputs.vcf_content }}
+        run: printf '%s' "$VCF_CONTENT" > import_input.vcf
+
+      - name: Kontakte importieren
+        env:
+          ICLOUD_USER: ${{ secrets.ICLOUD_USER }}
+          ICLOUD_PASS: ${{ secrets.ICLOUD_PASS }}
+        run: python icloud_contacts.py import --input import_input.vcf
