@@ -19,6 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 from getpass import getpass
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -84,7 +85,9 @@ def get_principal_url(session, user):
     href = root.find(".//d:current-user-principal/d:href", NS)
     if href is None:
         raise RuntimeError("Konnte Principal-URL nicht ermitteln.")
-    return CARDDAV_BASE + href.text
+    # iCloud liefert hier teils absolute URLs (eigener Shard-Server),
+    # teils relative Pfade — urljoin behandelt beide Fälle korrekt.
+    return urljoin(r.url, href.text)
 
 
 def get_addressbook_url(session, principal_url):
@@ -110,7 +113,7 @@ def get_addressbook_url(session, principal_url):
     if href is None:
         raise RuntimeError("Konnte Adressbuch-URL nicht ermitteln.")
 
-    ab_home = CARDDAV_BASE + href.text
+    ab_home = urljoin(r.url, href.text)
 
     # Listet verfügbare Adressbücher auf
     r2 = session.request(
@@ -130,7 +133,7 @@ def get_addressbook_url(session, principal_url):
         if rt is not None and rt.find("card:addressbook", NS) is not None:
             h = resp.find("d:href", NS)
             if h is not None:
-                return CARDDAV_BASE + h.text
+                return urljoin(ab_home, h.text)
 
     raise RuntimeError("Kein Adressbuch gefunden.")
 
@@ -164,13 +167,15 @@ def fetch_all_contact_hrefs(session, addressbook_url):
         href = resp.find("d:href", NS)
         etag = resp.find(".//d:getetag", NS)
         if href is not None:
-            contacts.append((href.text, etag.text if etag is not None else ""))
+            # Absolute URL aufbauen (iCloud-hrefs können relativ oder absolut sein)
+            url = urljoin(addressbook_url, href.text)
+            contacts.append((url, etag.text if etag is not None else ""))
     return contacts
 
 
-def fetch_vcard(session, href):
-    """Lädt eine einzelne vCard per GET."""
-    r = session.get(CARDDAV_BASE + href, headers={"Accept": "text/vcard"})
+def fetch_vcard(session, url):
+    """Lädt eine einzelne vCard per GET. Erwartet eine absolute URL."""
+    r = session.get(url, headers={"Accept": "text/vcard"})
     r.raise_for_status()
     return r.text
 
@@ -270,6 +275,8 @@ def cmd_import(args, session, addressbook_url):
     # Vorhandene UIDs aus iCloud laden
     uid_map = fetch_existing_uids(session, addressbook_url)
 
+    dry_run = getattr(args, "dry_run", False)
+
     updated = 0
     created = 0
     errors  = 0
@@ -282,9 +289,12 @@ def cmd_import(args, session, addressbook_url):
             continue
 
         if uid in uid_map:
-            # Update: vorhandener Kontakt
-            href = uid_map[uid]
-            url  = CARDDAV_BASE + href
+            # Update: vorhandener Kontakt (uid_map enthält bereits absolute URLs)
+            url = uid_map[uid]
+            if dry_run:
+                print(f"  [{i}] (dry-run) WÜRDE AKTUALISIEREN: {uid[:20]}...")
+                updated += 1
+                continue
             r = put_vcard(session, url, vcard)
             if r.status_code in (200, 201, 204):
                 print(f"  [{i}] AKTUALISIERT: {uid[:20]}...")
@@ -296,6 +306,10 @@ def cmd_import(args, session, addressbook_url):
             # Neuanlage: neue .vcf-Ressource im Adressbuch
             safe_uid = re.sub(r"[^a-zA-Z0-9\-]", "", uid)
             url = addressbook_url.rstrip("/") + f"/{safe_uid}.vcf"
+            if dry_run:
+                print(f"  [{i}] (dry-run) WÜRDE NEU ANLEGEN: {uid[:20]}...")
+                created += 1
+                continue
             r = put_vcard(session, url, vcard)
             if r.status_code in (200, 201, 204):
                 print(f"  [{i}] NEU ANGELEGT: {uid[:20]}...")
