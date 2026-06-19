@@ -250,10 +250,16 @@ def embed_photos(session, vcard_text):
         if not sep or not value.lower().startswith(("http://", "https://")):
             continue  # bereits eingebettet oder kein URL-Verweis
 
+        # iCloud faltet bei "geteilten Fotos" die Property X-SHARED-PHOTO-
+        # DISPLAY-PREF direkt an die PHOTO-URL an. Saubere Karten-URL bis zum
+        # Hash extrahieren, angehängten Property-Müll abschneiden.
+        m = re.match(r"https?://\S*?/ck/card/[0-9a-fA-F]+", value.strip())
+        photo_url = m.group(0) if m else value.strip().split("X-SHARED-PHOTO-DISPLAY-PREF")[0]
+
         data = resp = None
         for attempt in range(3):  # kleiner Retry gegen transiente Aussetzer
             try:
-                resp = session.get(value.strip(), timeout=30)
+                resp = session.get(photo_url, timeout=30)
                 resp.raise_for_status()
                 data = resp.content
                 break
