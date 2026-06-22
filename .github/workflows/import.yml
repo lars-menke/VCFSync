@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       vcf_content:
-        description: "VCF-Inhalt einfügen (max. 65.536 Zeichen)"
+        description: "VCF als Base64 (einzeilig) ODER roher VCF-Text. Das Feld ist einzeilig - mehrzeilige VCF bitte Base64-kodiert einfuegen."
         type: string
         required: true
 
@@ -26,7 +26,26 @@ jobs:
       - name: VCF-Inhalt in Datei schreiben
         env:
           VCF_CONTENT: ${{ inputs.vcf_content }}
-        run: printf '%s' "$VCF_CONTENT" > import_input.vcf
+        run: |
+          python3 - <<'EOF'
+          import os, base64, sys
+          raw = os.environ.get("VCF_CONTENT", "")
+          # Das einzeilige workflow_dispatch-Feld entfernt Zeilenumbrueche.
+          # Enthaelt der Input kein BEGIN:VCARD, wird Base64 erwartet und dekodiert.
+          if "BEGIN:VCARD" not in raw:
+              try:
+                  raw = base64.b64decode(raw).decode("utf-8")
+              except Exception as e:
+                  print(f"Eingabe ist weder gueltige VCF noch Base64: {e}")
+                  sys.exit(1)
+          with open("import_input.vcf", "w", encoding="utf-8") as fh:
+              fh.write(raw)
+          n = raw.count("BEGIN:VCARD")
+          print(f"import_input.vcf geschrieben - erkannte Karten: {n}")
+          if n == 0:
+              print("Keine vCard erkannt - Abbruch.")
+              sys.exit(1)
+          EOF
 
       - name: Kontakte importieren
         env:

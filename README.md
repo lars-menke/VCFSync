@@ -30,16 +30,23 @@ aktualisiert (keine Duplikate), neue Kontakte werden angelegt.
 
 ## Import ausführen
 
-1. VCF-Inhalt in die Zwischenablage kopieren
-2. GitHub → Tab `Actions` → `iCloud Kontakte Import`
-3. Klick auf `Run workflow` → VCF-Inhalt in das Textfeld einfügen →
-   `Run workflow`
-4. Bei großen Dateien (>65.000 Zeichen): Skript **lokal** ausführen (siehe unten)
+> **Wichtig:** Das Eingabefeld von GitHub Actions ist **einzeilig** — beim
+> Einfügen einer mehrzeiligen VCF wirft der Browser alle Zeilenumbrüche weg und
+> es wird nichts importiert. Deshalb wird die VCF **Base64-kodiert** (eine
+> einzige Zeile) eingefügt; der Workflow dekodiert sie automatisch.
 
-   > GitHub Actions unterstützt keine Datei-Uploads als Workflow-Input, daher
-   > wird der VCF-Inhalt als Text in eine Textarea eingefügt. Diese ist auf
-   > **65.536 Zeichen** limitiert. Bei vielen Kontakten mit Base64-Fotos wird
-   > die Datei schnell größer als dieses Limit — dann lokal importieren.
+1. VCF Base64-kodieren (eine Zeile):
+   - Linux: `base64 -w0 meine_kontakte.vcf`
+   - macOS: `base64 -i meine_kontakte.vcf`
+2. Den Base64-String kopieren
+3. GitHub → Tab `Actions` → `iCloud Kontakte Import`
+4. `Run workflow` → Base64-String in das Feld einfügen → `Run workflow`
+5. Bei großen Dateien (Eingabe-Limit ~65.000 Zeichen) oder vielen Fotos: Skript
+   **lokal** ausführen (siehe unten) — für den Vollbestand der empfohlene Weg.
+
+   > Hinweis: roher VCF-Text wird weiterhin akzeptiert (z. B. eine einzelne,
+   > einzeilige Karte). Sobald Zeilenumbrüche im Spiel sind, ist Base64 über die
+   > Weboberfläche der zuverlässige Weg.
 
 ## Lokale Nutzung
 
