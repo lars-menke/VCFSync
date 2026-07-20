@@ -61,7 +61,16 @@ python icloud_contacts.py import --input bearbeitete_kontakte.vcf
 
 # Import simulieren (nichts wird geschrieben)
 python icloud_contacts.py import --input bearbeitete_kontakte.vcf --dry-run
+
+# Kontakte löschen (per UID oder anhand einer VCF mit den zu löschenden Karten)
+python icloud_contacts.py delete --uid <UID> [--uid <UID> ...]
+python icloud_contacts.py delete --input zu_loeschen.vcf
+python icloud_contacts.py delete --input zu_loeschen.vcf --dry-run
 ```
+
+> Hinweis: `import` kann Kontakte nur anlegen/aktualisieren, nicht entfernen.
+> Zum vollständigen Löschen von Kontakten dient `delete` (per HTTP DELETE).
+> Immer erst mit `--dry-run` prüfen — Löschen ist nicht umkehrbar.
 
 Zugangsdaten werden beim ersten Start abgefragt und optional in einer
 `.env`-Datei gespeichert, oder als Umgebungsvariablen gesetzt:
