@@ -434,6 +434,62 @@ def cmd_import(args, session, addressbook_url):
 
 
 # ---------------------------------------------------------------------------
+# Löschen
+# ---------------------------------------------------------------------------
+
+def delete_contact(session, url):
+    """Löscht eine Kontakt-Ressource per HTTP DELETE."""
+    return session.delete(url)
+
+
+def cmd_delete(args, session, addressbook_url):
+    """Löscht Kontakte anhand ihrer UID (aus --uid und/oder --input VCF)."""
+    uids = []
+    if getattr(args, "input", None):
+        input_file = Path(args.input)
+        if not input_file.exists():
+            print(f"Datei nicht gefunden: {input_file}")
+            sys.exit(1)
+        for vcard in split_vcards(input_file.read_text(encoding="utf-8")):
+            u = extract_uid(vcard)
+            if u:
+                uids.append(u)
+    for u in getattr(args, "uid", None) or []:
+        uids.append(u.strip())
+    uids = list(dict.fromkeys(uids))  # Reihenfolge erhalten, Duplikate raus
+
+    if not uids:
+        print("Keine UIDs angegeben. Nutze --input <vcf> und/oder --uid <UID>.")
+        sys.exit(1)
+    print(f"{len(uids)} zu löschende Kontakt-UID(s).")
+
+    uid_map = fetch_existing_uids(session, addressbook_url)
+    dry_run = getattr(args, "dry_run", False)
+
+    deleted = missing = errors = 0
+    for i, uid in enumerate(uids, 1):
+        if uid not in uid_map:
+            print(f"  [{i}] NICHT GEFUNDEN (evtl. schon gelöscht): {uid[:20]}...")
+            missing += 1
+            continue
+        url = uid_map[uid]
+        if dry_run:
+            print(f"  [{i}] (dry-run) WÜRDE LÖSCHEN: {uid[:20]}...")
+            deleted += 1
+            continue
+        r = delete_contact(session, url)
+        if r.status_code in (200, 204):
+            print(f"  [{i}] GELÖSCHT: {uid[:20]}...")
+            deleted += 1
+        else:
+            print(f"  [{i}] FEHLER Löschen {r.status_code}: {uid[:20]}")
+            errors += 1
+        time.sleep(0.1)  # sanftes Rate-Limiting
+
+    print(f"\nFertig: {deleted} gelöscht, {missing} nicht gefunden, {errors} Fehler.")
+
+
+# ---------------------------------------------------------------------------
 # Hauptprogramm
 # ---------------------------------------------------------------------------
 
@@ -454,6 +510,14 @@ def main():
                      help="Zu importierende VCF-Datei")
     imp.add_argument("--dry-run", action="store_true",
                      help="Nur simulieren, nichts schreiben")
+
+    dele = sub.add_parser("delete", help="Kontakte aus iCloud löschen (per UID oder VCF)")
+    dele.add_argument("--input",
+                      help="VCF-Datei; alle darin enthaltenen UIDs werden gelöscht")
+    dele.add_argument("--uid", action="append",
+                      help="Einzelne UID zum Löschen (mehrfach angebbar)")
+    dele.add_argument("--dry-run", action="store_true",
+                      help="Nur simulieren, nichts löschen")
 
     args = parser.parse_args()
 
@@ -480,6 +544,10 @@ def main():
         if getattr(args, "dry_run", False):
             print("DRY-RUN: Es werden keine Daten geschrieben.")
         cmd_import(args, session, addressbook_url)
+    elif args.cmd == "delete":
+        if getattr(args, "dry_run", False):
+            print("DRY-RUN: Es werden keine Daten gelöscht.")
+        cmd_delete(args, session, addressbook_url)
 
 
 if __name__ == "__main__":
