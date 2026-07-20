@@ -91,9 +91,10 @@ def get_principal_url(session, user):
     return urljoin(r.url, href.text)
 
 
-def get_addressbook_url(session, principal_url):
+def get_all_addressbook_urls(session, principal_url):
     """
-    Ermittelt die Adressbuch-URL via PROPFIND auf der Principal-URL.
+    Ermittelt ALLE Adressbuch-Collections des Nutzers.
+    Gibt Liste von (url, displayname) zurück.
     """
     body = """<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
@@ -112,7 +113,7 @@ def get_addressbook_url(session, principal_url):
     root = ET.fromstring(r.text)
     href = root.find(".//card:addressbook-home-set/d:href", NS)
     if href is None:
-        raise RuntimeError("Konnte Adressbuch-URL nicht ermitteln.")
+        raise RuntimeError("Konnte Adressbuch-Home-Set nicht ermitteln.")
 
     ab_home = urljoin(r.url, href.text)
 
@@ -129,14 +130,24 @@ def get_addressbook_url(session, principal_url):
     r2.raise_for_status()
     root2 = ET.fromstring(r2.text)
 
+    books = []
     for resp in root2.findall("d:response", NS):
         rt = resp.find(".//d:resourcetype", NS)
         if rt is not None and rt.find("card:addressbook", NS) is not None:
             h = resp.find("d:href", NS)
+            dn = resp.find(".//d:displayname", NS)
             if h is not None:
-                return urljoin(ab_home, h.text)
+                name = dn.text if (dn is not None and dn.text) else "(ohne Namen)"
+                books.append((urljoin(ab_home, h.text), name))
 
-    raise RuntimeError("Kein Adressbuch gefunden.")
+    if not books:
+        raise RuntimeError("Kein Adressbuch gefunden.")
+    return books
+
+
+def get_addressbook_url(session, principal_url):
+    """Ermittelt die (erste) Adressbuch-URL – für Import/Löschen."""
+    return get_all_addressbook_urls(session, principal_url)[0][0]
 
 
 def _parse_contact_hrefs(xml_text, addressbook_url):
@@ -160,16 +171,7 @@ def _parse_contact_hrefs(xml_text, addressbook_url):
     return found
 
 
-def fetch_all_contact_hrefs(session, addressbook_url):
-    """
-    Gibt Liste von (href, etag) aller Kontakte im Adressbuch zurück.
-
-    Nutzt PROPFIND UND zusätzlich einen addressbook-query-REPORT und vereinigt
-    beide Ergebnisse. Grund: iClouds PROPFIND listet in manchen Fällen einzelne
-    (z.B. neu angelegte) Kontakte nicht mit auf – der REPORT fängt diese ab.
-    Vereinigung kann nur mehr Kontakte finden, nie weniger.
-    """
-    propfind_body = """<?xml version="1.0" encoding="utf-8"?>
+PROPFIND_HREFS_BODY = """<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:getetag/>
@@ -177,18 +179,7 @@ def fetch_all_contact_hrefs(session, addressbook_url):
   </d:prop>
 </d:propfind>"""
 
-    r = session.request(
-        "PROPFIND",
-        addressbook_url,
-        data=propfind_body.encode(),
-        headers={"Depth": "1", "Content-Type": "application/xml"},
-    )
-    r.raise_for_status()
-    merged = _parse_contact_hrefs(r.text, addressbook_url)
-    propfind_count = len(merged)
-
-    # Zusätzlich: addressbook-query-REPORT (alle Karten mit UID = alle Kontakte)
-    report_body = """<?xml version="1.0" encoding="utf-8"?>
+ADDRESSBOOK_QUERY_BODY = """<?xml version="1.0" encoding="utf-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
   <d:prop>
     <d:getetag/>
@@ -197,25 +188,65 @@ def fetch_all_contact_hrefs(session, addressbook_url):
     <card:prop-filter name="UID"/>
   </card:filter>
 </card:addressbook-query>"""
+
+SYNC_COLLECTION_BODY = """<?xml version="1.0" encoding="utf-8"?>
+<d:sync-collection xmlns:d="DAV:">
+  <d:sync-token></d:sync-token>
+  <d:sync-level>1</d:sync-level>
+  <d:prop>
+    <d:getetag/>
+  </d:prop>
+</d:sync-collection>"""
+
+
+def _enumerate(session, addressbook_url, method, body):
+    """Führt PROPFIND/REPORT aus und liefert {url: etag}; bei Fehler ({}, Fehlertext)."""
     try:
-        r2 = session.request(
-            "REPORT",
+        r = session.request(
+            method,
             addressbook_url,
-            data=report_body.encode(),
+            data=body.encode(),
             headers={"Depth": "1", "Content-Type": "application/xml"},
         )
-        if r2.status_code in (200, 207):
-            extra = 0
-            for url, etag in _parse_contact_hrefs(r2.text, addressbook_url).items():
-                if url not in merged:
-                    extra += 1
-                merged.setdefault(url, etag)
-            if extra:
-                print(f"  Hinweis: REPORT fand {extra} zusätzliche(n) Kontakt(e), "
-                      f"die PROPFIND nicht auflistete.")
+        if r.status_code in (200, 207):
+            return _parse_contact_hrefs(r.text, addressbook_url), None
+        return {}, f"HTTP {r.status_code}"
     except Exception as e:
-        print(f"  Hinweis: addressbook-query-REPORT nicht nutzbar ({e}).")
+        return {}, str(e)
 
+
+def fetch_all_contact_hrefs(session, addressbook_url, verbose=True):
+    """
+    Gibt Liste von (href, etag) aller Kontakte im Adressbuch zurück.
+
+    iClouds PROPFIND listet in manchen Fällen einzelne Kontakte nicht mit auf.
+    Deshalb werden drei Enumerationsverfahren kombiniert und ihre Ergebnisse
+    vereinigt (Union kann nur mehr Kontakte finden, nie weniger):
+      1. PROPFIND (Depth:1)
+      2. addressbook-query REPORT (alle Karten mit UID)
+      3. sync-collection REPORT (vollständige Sync-Auflistung, RFC 6578)
+    Mit verbose=True wird pro Verfahren die Trefferzahl ausgegeben (Diagnose).
+    """
+    pf, pf_err = _enumerate(session, addressbook_url, "PROPFIND", PROPFIND_HREFS_BODY)
+    aq, aq_err = _enumerate(session, addressbook_url, "REPORT", ADDRESSBOOK_QUERY_BODY)
+    sc, sc_err = _enumerate(session, addressbook_url, "REPORT", SYNC_COLLECTION_BODY)
+
+    merged = {}
+    for d in (pf, aq, sc):
+        for url, etag in d.items():
+            merged.setdefault(url, etag)
+
+    if verbose:
+        def fmt(name, d, err):
+            return f"{name}={len(d)}" + (f" (Fehler: {err})" if err else "")
+        print("    Enumeration: " + " | ".join([
+            fmt("PROPFIND", pf, pf_err),
+            fmt("addressbook-query", aq, aq_err),
+            fmt("sync-collection", sc, sc_err),
+        ]) + f" | Union={len(merged)}")
+
+    if not merged and pf_err:
+        raise RuntimeError(f"Konnte Kontakte nicht auflisten (PROPFIND: {pf_err}).")
     return list(merged.items())
 
 
@@ -336,12 +367,20 @@ def embed_photos(session, vcard_text):
 # Export
 # ---------------------------------------------------------------------------
 
-def cmd_export(args, session, addressbook_url):
+def cmd_export(args, session, addressbook_urls):
     output = Path(args.output)
-    print(f"Lade Kontaktliste aus {addressbook_url} ...")
-    hrefs = fetch_all_contact_hrefs(session, addressbook_url)
+    # Über ALLE Adressbücher hinweg sammeln und per URL vereinigen.
+    if isinstance(addressbook_urls, str):
+        addressbook_urls = [(addressbook_urls, "")]
+    print(f"Durchsuche {len(addressbook_urls)} Adressbuch/Adressbücher ...")
+    href_map = {}
+    for ab_url, ab_name in addressbook_urls:
+        print(f"  Adressbuch '{ab_name}':")
+        for href, etag in fetch_all_contact_hrefs(session, ab_url):
+            href_map.setdefault(href, etag)
+    hrefs = list(href_map.items())
     total = len(hrefs)
-    print(f"{total} Kontakte gefunden.")
+    print(f"{total} Kontakte gefunden (über alle Adressbücher).")
 
     embed = not getattr(args, "skip_photos", False)
     photo_count = 0
@@ -575,24 +614,27 @@ def main():
     print("Verbinde mit iCloud ...")
     try:
         principal_url  = get_principal_url(session, user)
-        addressbook_url = get_addressbook_url(session, principal_url)
-        print(f"Adressbuch: {addressbook_url}")
+        books = get_all_addressbook_urls(session, principal_url)
+        print(f"{len(books)} Adressbuch/Adressbücher gefunden:")
+        for url, name in books:
+            print(f"  - {name}: {url}")
     except Exception as e:
         print(f"Verbindungsfehler: {e}")
         print("Hinweis: Stelle sicher, dass du ein app-spezifisches Passwort verwendest")
         print("         (appleid.apple.com > Sicherheit > App-spezifische Passwörter)")
         sys.exit(1)
 
+    primary_url = books[0][0]  # erstes Adressbuch für Import/Neuanlage/Löschen
     if args.cmd == "export":
-        cmd_export(args, session, addressbook_url)
+        cmd_export(args, session, books)
     elif args.cmd == "import":
         if getattr(args, "dry_run", False):
             print("DRY-RUN: Es werden keine Daten geschrieben.")
-        cmd_import(args, session, addressbook_url)
+        cmd_import(args, session, primary_url)
     elif args.cmd == "delete":
         if getattr(args, "dry_run", False):
             print("DRY-RUN: Es werden keine Daten gelöscht.")
-        cmd_delete(args, session, addressbook_url)
+        cmd_delete(args, session, primary_url)
 
 
 if __name__ == "__main__":
