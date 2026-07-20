@@ -139,11 +139,37 @@ def get_addressbook_url(session, principal_url):
     raise RuntimeError("Kein Adressbuch gefunden.")
 
 
+def _parse_contact_hrefs(xml_text, addressbook_url):
+    """Extrahiert {url: etag} aller Kontakt-Ressourcen aus einer Multistatus-Antwort."""
+    found = {}
+    root = ET.fromstring(xml_text)
+    ab = addressbook_url.rstrip("/")
+    for resp in root.findall("d:response", NS):
+        rt = resp.find(".//d:resourcetype/d:collection", NS)
+        if rt is not None:
+            continue  # Überspringe Sammlungen (das Adressbuch selbst)
+        href = resp.find("d:href", NS)
+        if href is None or not href.text:
+            continue
+        etag = resp.find(".//d:getetag", NS)
+        # Absolute URL aufbauen (iCloud-hrefs können relativ oder absolut sein)
+        url = urljoin(addressbook_url, href.text)
+        if url.rstrip("/") == ab:
+            continue  # das Adressbuch selbst
+        found[url] = etag.text if etag is not None else ""
+    return found
+
+
 def fetch_all_contact_hrefs(session, addressbook_url):
     """
     Gibt Liste von (href, etag) aller Kontakte im Adressbuch zurück.
+
+    Nutzt PROPFIND UND zusätzlich einen addressbook-query-REPORT und vereinigt
+    beide Ergebnisse. Grund: iClouds PROPFIND listet in manchen Fällen einzelne
+    (z.B. neu angelegte) Kontakte nicht mit auf – der REPORT fängt diese ab.
+    Vereinigung kann nur mehr Kontakte finden, nie weniger.
     """
-    body = """<?xml version="1.0" encoding="utf-8"?>
+    propfind_body = """<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:getetag/>
@@ -154,24 +180,43 @@ def fetch_all_contact_hrefs(session, addressbook_url):
     r = session.request(
         "PROPFIND",
         addressbook_url,
-        data=body.encode(),
+        data=propfind_body.encode(),
         headers={"Depth": "1", "Content-Type": "application/xml"},
     )
     r.raise_for_status()
-    root = ET.fromstring(r.text)
+    merged = _parse_contact_hrefs(r.text, addressbook_url)
+    propfind_count = len(merged)
 
-    contacts = []
-    for resp in root.findall("d:response", NS):
-        rt = resp.find(".//d:resourcetype/d:collection", NS)
-        if rt is not None:
-            continue  # Überspringe Sammlungen (das Adressbuch selbst)
-        href = resp.find("d:href", NS)
-        etag = resp.find(".//d:getetag", NS)
-        if href is not None:
-            # Absolute URL aufbauen (iCloud-hrefs können relativ oder absolut sein)
-            url = urljoin(addressbook_url, href.text)
-            contacts.append((url, etag.text if etag is not None else ""))
-    return contacts
+    # Zusätzlich: addressbook-query-REPORT (alle Karten mit UID = alle Kontakte)
+    report_body = """<?xml version="1.0" encoding="utf-8"?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag/>
+  </d:prop>
+  <card:filter>
+    <card:prop-filter name="UID"/>
+  </card:filter>
+</card:addressbook-query>"""
+    try:
+        r2 = session.request(
+            "REPORT",
+            addressbook_url,
+            data=report_body.encode(),
+            headers={"Depth": "1", "Content-Type": "application/xml"},
+        )
+        if r2.status_code in (200, 207):
+            extra = 0
+            for url, etag in _parse_contact_hrefs(r2.text, addressbook_url).items():
+                if url not in merged:
+                    extra += 1
+                merged.setdefault(url, etag)
+            if extra:
+                print(f"  Hinweis: REPORT fand {extra} zusätzliche(n) Kontakt(e), "
+                      f"die PROPFIND nicht auflistete.")
+    except Exception as e:
+        print(f"  Hinweis: addressbook-query-REPORT nicht nutzbar ({e}).")
+
+    return list(merged.items())
 
 
 def fetch_vcard(session, url):
