@@ -48,6 +48,16 @@ aktualisiert (keine Duplikate), neue Kontakte werden angelegt.
    > einzeilige Karte). Sobald Zeilenumbrüche im Spiel sind, ist Base64 über die
    > Weboberfläche der zuverlässige Weg.
 
+## Nutzung ohne lokale Python-Installation (GitHub Codespaces)
+
+Falls kein Python zur Verfügung steht (z. B. Firmen-PC ohne Adminrechte) oder
+a-Shell auf dem iPhone zu umständlich ist: Repository auf GitHub öffnen →
+`Code` → Tab `Codespaces` → `Create codespace on main`. Startet eine
+fertig eingerichtete Cloud-Umgebung mit Python und allen Abhängigkeiten
+(`.devcontainer/devcontainer.json`) — Terminal öffnet sich automatisch im
+Browser, alle Befehle aus diesem README funktionieren dort 1:1. Dateien
+lassen sich per Rechtsklick im Datei-Explorer hoch-/runterladen.
+
 ## Lokale Nutzung
 
 ```bash
