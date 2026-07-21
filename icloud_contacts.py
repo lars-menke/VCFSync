@@ -444,13 +444,26 @@ def split_vcards(text):
     return cards
 
 
-def fetch_existing_uids(session, addressbook_url):
+def fetch_existing_uids(session, addressbook_urls):
     """
     Gibt Dict {uid: href} aller vorhandenen Kontakte zurück.
     Lädt dazu jede vCard und liest die UID.
+
+    addressbook_urls kann eine einzelne URL (str) oder eine Liste von
+    (url, name)-Tupeln sein. Wie beim Export werden ALLE Adressbücher
+    durchsucht - sonst gelten Kontakte aus einem zweiten Adressbuch beim
+    Import fälschlich als "neu" (Duplikat-Risiko).
     """
+    if isinstance(addressbook_urls, str):
+        addressbook_urls = [(addressbook_urls, "")]
+
     print("Lese vorhandene Kontakte aus iCloud (für UID-Abgleich) ...")
-    hrefs = fetch_all_contact_hrefs(session, addressbook_url)
+    href_map = {}
+    for ab_url, ab_name in addressbook_urls:
+        for href, etag in fetch_all_contact_hrefs(session, ab_url):
+            href_map.setdefault(href, etag)
+    hrefs = list(href_map.items())
+
     uid_map = {}
     for i, (href, _) in enumerate(hrefs, 1):
         print(f"\r  {i}/{len(hrefs)} ...", end="", flush=True)
@@ -477,7 +490,7 @@ def put_vcard(session, url, vcard_text, etag=None):
     return r
 
 
-def cmd_import(args, session, addressbook_url):
+def cmd_import(args, session, books, primary_url):
     input_file = Path(args.input)
     if not input_file.exists():
         print(f"Datei nicht gefunden: {input_file}")
@@ -486,8 +499,10 @@ def cmd_import(args, session, addressbook_url):
     vcards = split_vcards(input_file.read_text(encoding="utf-8"))
     print(f"{len(vcards)} Kontakte in {input_file} gefunden.")
 
-    # Vorhandene UIDs aus iCloud laden
-    uid_map = fetch_existing_uids(session, addressbook_url)
+    # Vorhandene UIDs aus ALLEN Adressbüchern laden (nicht nur dem ersten -
+    # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu)
+    uid_map = fetch_existing_uids(session, books)
+    addressbook_url = primary_url  # Ziel für Neuanlagen
 
     dry_run = getattr(args, "dry_run", False)
 
@@ -546,7 +561,7 @@ def delete_contact(session, url):
     return session.delete(url)
 
 
-def cmd_delete(args, session, addressbook_url):
+def cmd_delete(args, session, books):
     """Löscht Kontakte anhand ihrer UID (aus --uid und/oder --input VCF)."""
     uids = []
     if getattr(args, "input", None):
@@ -567,7 +582,7 @@ def cmd_delete(args, session, addressbook_url):
         sys.exit(1)
     print(f"{len(uids)} zu löschende Kontakt-UID(s).")
 
-    uid_map = fetch_existing_uids(session, addressbook_url)
+    uid_map = fetch_existing_uids(session, books)
     dry_run = getattr(args, "dry_run", False)
 
     deleted = missing = errors = 0
@@ -650,11 +665,11 @@ def main():
     elif args.cmd == "import":
         if getattr(args, "dry_run", False):
             print("DRY-RUN: Es werden keine Daten geschrieben.")
-        cmd_import(args, session, primary_url)
+        cmd_import(args, session, books, primary_url)
     elif args.cmd == "delete":
         if getattr(args, "dry_run", False):
             print("DRY-RUN: Es werden keine Daten gelöscht.")
-        cmd_delete(args, session, primary_url)
+        cmd_delete(args, session, books)
 
 
 if __name__ == "__main__":
