@@ -13,16 +13,21 @@ oder als Umgebungsvariablen gesetzt:
 
 import argparse
 import base64
+import math
 import os
 import re
 import sys
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from getpass import getpass
 from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from requests.auth import HTTPBasicAuth
 
 # ---------------------------------------------------------------------------
@@ -433,6 +438,329 @@ def cmd_export(args, session, addressbook_urls):
 
 
 # ---------------------------------------------------------------------------
+# Excel-Export (VCF -> XLSX) / Excel-Import (XLSX -> VCF)
+# ---------------------------------------------------------------------------
+#
+# Standard-Workflow:
+#   export -> to-excel -> (in Excel bearbeiten) -> from-excel -> import --dry-run -> import
+#
+# Telefone/E-Mails/Adressen/URLs werden in einer Zelle als "Label: Wert"
+# zusammengefasst, mehrere Einträge durch " | " getrennt, z.B.:
+#   mobil: +49171234567 | Arbeit: +494412345
+# Als Label gelten "mobil", "privat", "Arbeit" (feste Bedeutung) - alles
+# andere wird als eigenes Apple-Label (X-ABLabel) übernommen.
+
+EXCEL_COLUMNS = [
+    "UID", "Anzeigename", "Nachname", "Vorname", "Namenszusatz", "Praefix", "Suffix",
+    "Spitzname", "Organisation", "Abteilung", "Titel", "Telefone", "E-Mails",
+    "Adressen", "Geburtstag", "URLs", "Notiz", "Kategorien",
+]
+
+_ABLABEL_RE = re.compile(r"_\$!<(.+?)>!\$_")
+_TEL_LABELS = {"CELL": "mobil", "HOME": "privat", "WORK": "Arbeit"}
+_TEL_IGNORE = {"VOICE", "PREF"}
+_EMAIL_LABELS = {"HOME": "privat", "WORK": "Arbeit"}
+_EMAIL_IGNORE = {"INTERNET", "PREF"}
+_ADR_LABELS = {"HOME": "privat", "WORK": "Arbeit"}
+
+
+def _decode_ablabel(value):
+    """Apples Standard-Label-Konstanten (_$!<Other>!$_ usw.) in Klartext."""
+    m = _ABLABEL_RE.match(value or "")
+    return m.group(1) if m else (value or "")
+
+
+def _field_label(segs, item, item_labels, type_map, ignore):
+    """Lesbares Label (mobil/privat/Arbeit/eigenes) einer TEL/EMAIL/ADR/URL-
+    Property - entweder aus einem itemN.X-ABLabel oder aus TYPE=."""
+    if item and item in item_labels:
+        return _decode_ablabel(item_labels[item]) or "Sonstige"
+    for p in segs[1:]:
+        if p.upper().startswith("TYPE="):
+            for x in p[5:].split(","):
+                u = x.strip().upper()
+                if u and u not in ignore:
+                    return type_map.get(u, x.strip())
+    return "Sonstige"
+
+
+def vcard_to_fields(card_lines):
+    """Wandelt eine (bereits entfaltete) vCard in ein Feld-Dict fürs Excel um."""
+    item_labels = {}
+    for l in card_lines:
+        head = l.partition(":")[0].split(";")[0]
+        if "." in head and head.split(".", 1)[1].upper() == "X-ABLABEL":
+            item_labels[head.split(".", 1)[0]] = l.partition(":")[2]
+
+    d = {"UID": "", "FN": "", "Nachname": "", "Vorname": "", "Zusatz": "", "Praefix": "",
+         "Suffix": "", "Nick": "", "ORG": "", "Abt": "", "Titel": "", "BDAY": "",
+         "NOTE": "", "CAT": "", "TEL": [], "EMAIL": [], "ADR": [], "URL": [], "PHOTO_B64": ""}
+
+    for l in card_lines:
+        head = l.partition(":")[0]
+        val = l.partition(":")[2]
+        segs = head.split(";")
+        item = segs[0].split(".", 1)[0] if "." in segs[0] else None
+        base = segs[0].split(".", 1)[-1].upper()
+
+        if base == "UID":
+            d["UID"] = val
+        elif base == "FN":
+            d["FN"] = val
+        elif base == "N":
+            p = (val.split(";") + [""] * 5)[:5]
+            d["Nachname"], d["Vorname"], d["Zusatz"], d["Praefix"], d["Suffix"] = p
+        elif base == "NICKNAME":
+            d["Nick"] = val
+        elif base == "ORG":
+            parts = val.split(";")
+            d["ORG"] = parts[0]
+            d["Abt"] = parts[1] if len(parts) > 1 else ""
+        elif base == "TITLE":
+            d["Titel"] = val
+        elif base == "BDAY":
+            d["BDAY"] = val.replace("value=date:", "")
+        elif base == "NOTE":
+            d["NOTE"] = val.replace("\\n", " ").replace("\\,", ",")
+        elif base == "CATEGORIES":
+            d["CAT"] = val.replace("\\,", ",")
+        elif base == "TEL":
+            label = _field_label(segs, item, item_labels, _TEL_LABELS, _TEL_IGNORE)
+            d["TEL"].append(f"{label}: {val.strip()}")
+        elif base == "EMAIL":
+            label = _field_label(segs, item, item_labels, _EMAIL_LABELS, _EMAIL_IGNORE)
+            d["EMAIL"].append(f"{label}: {val.strip()}")
+        elif base == "URL":
+            label = _field_label(segs, item, item_labels, {}, {"PREF"})
+            d["URL"].append(f"{label}: {val.strip()}")
+        elif base == "ADR":
+            label = _field_label(segs, item, item_labels, _ADR_LABELS, {"PREF"})
+            p = (val.split(";") + [""] * 7)[:7]
+            street = (p[5] + " " + p[3]).strip()
+            flat = " ".join(x for x in [p[2], street, p[4], p[6]] if x.strip())
+            flat = flat.replace("\\n", " ").replace("\\,", ",")
+            d["ADR"].append(f"{label}: {flat}")
+        elif base == "PHOTO" and not val.lower().startswith(("http://", "https://")):
+            d["PHOTO_B64"] = val
+
+    return d
+
+
+def cmd_to_excel(args):
+    text = Path(args.input).read_text(encoding="utf-8")
+    cards = split_vcards(text)
+
+    rows = []
+    for card in cards:
+        lines = [l for l in unfold_vcard(card) if l.strip()]
+        is_group = any(
+            l.partition(":")[0].split(";")[0].split(".")[-1].upper() == "X-ADDRESSBOOKSERVER-KIND"
+            for l in lines
+        )
+        if is_group:
+            continue  # Gruppen ueberspringen - im iPhone ohnehin nicht sichtbar/bearbeitbar
+        rows.append(vcard_to_fields(lines))
+
+    rows.sort(key=lambda d: (d["Nachname"] or d["FN"]).lower())
+
+    chunk = 32000  # unter Excels Zellenlimit von 32.767 Zeichen
+    max_chunks = max((math.ceil(len(d["PHOTO_B64"]) / chunk) for d in rows if d["PHOTO_B64"]), default=1)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Kontakte"
+    header = EXCEL_COLUMNS + [f"Foto_Base64_{i + 1}" for i in range(max_chunks)]
+    ws.append(header)
+    header_fill = PatternFill("solid", fgColor="305496")
+    header_font = Font(bold=True, color="FFFFFF")
+    for col in range(1, len(header) + 1):
+        cell = ws.cell(1, col)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    for d in rows:
+        photo_chunks = [d["PHOTO_B64"][i:i + chunk] for i in range(0, len(d["PHOTO_B64"]), chunk)]
+        photo_chunks += [""] * (max_chunks - len(photo_chunks))
+        ws.append([
+            d["UID"], d["FN"], d["Nachname"], d["Vorname"], d["Zusatz"], d["Praefix"], d["Suffix"],
+            d["Nick"], d["ORG"], d["Abt"], d["Titel"], " | ".join(d["TEL"]), " | ".join(d["EMAIL"]),
+            " | ".join(d["ADR"]), d["BDAY"], " | ".join(d["URL"]), d["NOTE"], d["CAT"],
+        ] + photo_chunks)
+
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(EXCEL_COLUMNS))}{len(rows) + 1}"
+    widths = [38, 22, 16, 14, 12, 8, 8, 14, 22, 16, 14, 40, 34, 40, 12, 26, 30, 20]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    for i in range(max_chunks):
+        ws.column_dimensions[get_column_letter(len(EXCEL_COLUMNS) + 1 + i)].width = 40
+    ws.column_dimensions["A"].hidden = True  # UID nicht versehentlich verändern
+
+    wb.save(args.output)
+    photo_count = sum(1 for d in rows if d["PHOTO_B64"])
+    print(f"{len(rows)} Kontakte geschrieben ({photo_count} mit Foto).")
+    print(f"Gespeichert: {args.output}")
+
+
+def _vesc(value):
+    """Escaped Sonderzeichen für vCard-Werte (RFC 6350)."""
+    return (value or "").replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;")
+
+
+def _parse_label_pairs(cell_value):
+    """Zerlegt eine Excel-Zelle im Format 'Label: Wert | Label: Wert' in Paare."""
+    out = []
+    if not (cell_value or "").strip():
+        return out
+    for part in cell_value.split(" | "):
+        label, _, value = part.partition(": ")
+        label, value = label.strip(), value.strip()
+        if value:
+            out.append((label, value))
+    return out
+
+
+def _tel_property(label, value, next_item):
+    lab = label.lower()
+    if lab == "mobil":
+        return [f"TEL;type=CELL;type=VOICE:{value}"], next_item
+    if lab == "privat":
+        return [f"TEL;type=HOME;type=VOICE:{value}"], next_item
+    if lab == "arbeit":
+        return [f"TEL;type=WORK;type=VOICE:{value}"], next_item
+    item = f"item{next_item}"
+    ablabel = "_$!<Other>!$_" if lab in ("sonstige", "other") else label
+    return [f"{item}.TEL;type=VOICE:{value}", f"{item}.X-ABLabel:{ablabel}"], next_item + 1
+
+
+def _email_property(label, value, next_item):
+    lab = label.lower()
+    if lab == "privat":
+        return [f"EMAIL;type=INTERNET;type=HOME:{value}"], next_item
+    if lab == "arbeit":
+        return [f"EMAIL;type=INTERNET;type=WORK:{value}"], next_item
+    item = f"item{next_item}"
+    ablabel = "_$!<Other>!$_" if lab in ("sonstige", "other") else label
+    return [f"{item}.EMAIL;type=INTERNET:{value}", f"{item}.X-ABLabel:{ablabel}"], next_item + 1
+
+
+def _adr_property(label, flat_value, next_item):
+    """Baut aus dem Freitext eine ADR-Property. Straße/Ort lassen sich aus dem
+    Fließtext nicht zuverlässig trennen - der komplette Text landet in der
+    Straßen-Komponente, nur die PLZ wird per Regex herausgezogen."""
+    zip_match = re.search(r"\b(\d{5})\b", flat_value)
+    plz = zip_match.group(1) if zip_match else ""
+    comp = ["", "", _vesc(flat_value), "", "", plz, ""]
+    lab = label.lower()
+    if lab in ("privat", "arbeit"):
+        typ = "WORK" if lab == "arbeit" else "HOME"
+        return [f"ADR;type={typ}:" + ";".join(comp)], next_item
+    item = f"item{next_item}"
+    ablabel = "_$!<Other>!$_" if lab in ("sonstige", "other") else label
+    return [f"{item}.ADR:" + ";".join(comp), f"{item}.X-ABLabel:{ablabel}"], next_item + 1
+
+
+def _url_property(label, value, next_item):
+    if label.lower() in ("sonstige", "other", ""):
+        return [f"URL;type=OTHER:{value}"], next_item
+    item = f"item{next_item}"
+    return [f"{item}.URL:{value}", f"{item}.X-ABLabel:{label}"], next_item + 1
+
+
+def row_to_vcard(row, col_index, photo_cols):
+    def g(name):
+        i = col_index.get(name)
+        v = row[i] if i is not None and i < len(row) else None
+        return "" if v is None else str(v).strip()
+
+    uid = g("UID") or str(uuid.uuid4())
+    lines = ["BEGIN:VCARD", "VERSION:3.0", f"UID:{uid}"]
+
+    fn = g("Anzeigename")
+    nachname, vorname = g("Nachname"), g("Vorname")
+    zusatz, praefix, suffix = g("Namenszusatz"), g("Praefix"), g("Suffix")
+    if not fn:
+        fn = " ".join(x for x in (vorname, nachname) if x)
+    lines.append(f"FN:{_vesc(fn)}")
+    lines.append(f"N:{_vesc(nachname)};{_vesc(vorname)};{_vesc(zusatz)};{_vesc(praefix)};{_vesc(suffix)}")
+
+    if g("Spitzname"):
+        lines.append(f"NICKNAME:{_vesc(g('Spitzname'))}")
+    if g("Organisation") or g("Abteilung"):
+        org, abt = _vesc(g("Organisation")), g("Abteilung")
+        lines.append(f"ORG:{org};{_vesc(abt)}" if abt else f"ORG:{org}")
+    if g("Titel"):
+        lines.append(f"TITLE:{_vesc(g('Titel'))}")
+    if g("Geburtstag"):
+        lines.append(f"BDAY:{g('Geburtstag')}")
+    if g("Notiz"):
+        lines.append(f"NOTE:{_vesc(g('Notiz'))}")
+    if g("Kategorien"):
+        lines.append(f"CATEGORIES:{_vesc(g('Kategorien'))}")
+
+    next_item = 1
+    for label, value in _parse_label_pairs(g("Telefone")):
+        props, next_item = _tel_property(label, value, next_item)
+        lines += props
+    for label, value in _parse_label_pairs(g("E-Mails")):
+        props, next_item = _email_property(label, value, next_item)
+        lines += props
+    for label, value in _parse_label_pairs(g("Adressen")):
+        props, next_item = _adr_property(label, value, next_item)
+        lines += props
+    for label, value in _parse_label_pairs(g("URLs")):
+        props, next_item = _url_property(label, value, next_item)
+        lines += props
+
+    photo_b64 = "".join(g(c) for c in photo_cols)
+    if photo_b64:
+        subtype = "JPEG"
+        try:
+            subtype = _photo_subtype("", base64.b64decode(photo_b64))
+        except Exception:
+            pass
+        lines.append(f"PHOTO;ENCODING=b;TYPE={subtype}:{photo_b64}")
+
+    lines.append("END:VCARD")
+    return "\r\n".join(fold_line(l) for l in lines)
+
+
+def cmd_from_excel(args):
+    wb = load_workbook(args.input, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    header = [str(h) if h is not None else "" for h in rows[0]]
+    col_index = {h: i for i, h in enumerate(header)}
+    photo_cols = [h for h in header if h.startswith("Foto_Base64_")]
+
+    missing = [c for c in EXCEL_COLUMNS if c not in col_index]
+    if missing:
+        print(f"Fehlende Spalten in {args.input}: {', '.join(missing)}")
+        print("Wurde die Datei mit 'to-excel' erzeugt und nicht umbenannt/umsortiert?")
+        sys.exit(1)
+
+    cards = []
+    skipped = 0
+    for row in rows[1:]:
+        if row is None or all(v is None for v in row):
+            continue
+        has_name = any(
+            str(row[col_index[c]] or "").strip()
+            for c in ("Anzeigename", "Nachname", "Vorname")
+        )
+        if not has_name:
+            skipped += 1
+            continue
+        cards.append(row_to_vcard(row, col_index, photo_cols))
+
+    Path(args.output).write_text("\r\n".join(cards) + "\r\n", encoding="utf-8")
+    suffix = f", {skipped} leere Zeile(n) übersprungen" if skipped else ""
+    print(f"{len(cards)} Kontakte geschrieben{suffix}.")
+    print(f"Gespeichert: {args.output}")
+
+
+# ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
 
@@ -642,7 +970,25 @@ def main():
     dele.add_argument("--dry-run", action="store_true",
                       help="Nur simulieren, nichts löschen")
 
+    toexcel = sub.add_parser("to-excel", help="VCF in eine Excel-Liste zum Bearbeiten wandeln")
+    toexcel.add_argument("--input", required=True, help="Quell-VCF-Datei")
+    toexcel.add_argument("--output", default="kontakte.xlsx",
+                         help="Ziel-Excel-Datei (Standard: kontakte.xlsx)")
+
+    fromexcel = sub.add_parser("from-excel", help="Bearbeitete Excel-Liste zurück in VCF wandeln")
+    fromexcel.add_argument("--input", required=True, help="Quell-Excel-Datei")
+    fromexcel.add_argument("--output", default="kontakte_bearbeitet.vcf",
+                           help="Ziel-VCF-Datei (Standard: kontakte_bearbeitet.vcf)")
+
     args = parser.parse_args()
+
+    # to-excel/from-excel arbeiten rein lokal auf Dateien - keine iCloud-Verbindung nötig
+    if args.cmd == "to-excel":
+        cmd_to_excel(args)
+        return
+    if args.cmd == "from-excel":
+        cmd_from_excel(args)
+        return
 
     # Session aufbauen
     user, pw = get_credentials()
