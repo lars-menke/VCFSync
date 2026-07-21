@@ -340,6 +340,41 @@ def _photo_subtype(content_type, data):
     return "JPEG"  # iCloud liefert in aller Regel JPEG
 
 
+_PHOTO_SIZE_WARN_BYTES = 150 * 1024  # iCloud hat groessere Fotos schon mit HTTP 403 abgelehnt
+
+
+def normalize_photo_type(vcard_text):
+    """Korrigiert ein falsch deklariertes PHOTO-TYPE (z.B. TYPE=JPEG bei
+    tatsaechlichen PNG-Bytes) anhand der echten Magic-Bytes - iCloud hat so
+    eine Karte schon mit HTTP 403 abgelehnt. Warnt zusaetzlich bei sehr
+    grossen Fotos, die (auch mit korrektem Typ) an einem iCloud-Limit
+    scheitern koennen; eine automatische Verkleinerung braeuchte eine
+    Bildbibliothek (Pillow) und ist bewusst nicht eingebaut, damit das
+    Skript ohne kompilierte Abhaengigkeiten lauffaehig bleibt (z.B. a-Shell).
+    Gibt (vcard_text, warnungen) zurueck."""
+    lines = unfold_vcard(vcard_text)
+    warnings = []
+    for i, l in enumerate(lines):
+        if not l.upper().startswith("PHOTO"):
+            continue
+        head, sep, val = l.partition(":")
+        if not sep or val.lower().startswith(("http://", "https://")):
+            continue  # URL-Verweis, keine eingebetteten Bilddaten
+        try:
+            data = base64.b64decode(val)
+        except Exception:
+            continue
+        real_type = _photo_subtype("", data)
+        m = re.search(r"TYPE=([A-Za-z0-9]+)", head, re.IGNORECASE)
+        declared = m.group(1).upper() if m else None
+        if declared and declared != real_type:
+            head = re.sub(r"TYPE=[A-Za-z0-9]+", f"TYPE={real_type}", head, flags=re.IGNORECASE)
+            lines[i] = f"{head}:{val}"
+        if len(data) > _PHOTO_SIZE_WARN_BYTES:
+            warnings.append(f"{len(data) / 1024:.0f} KB")
+    return "\r\n".join(fold_line(x) for x in lines), warnings
+
+
 def embed_photos(session, vcard_text):
     """
     Ersetzt PHOTO-Verweise (PHOTO;...;VALUE=uri:https://...) durch eingebettete
@@ -843,6 +878,9 @@ def cmd_import(args, session, books, primary_url):
     errors  = 0
 
     for i, vcard in enumerate(vcards, 1):
+        vcard, photo_warnings = normalize_photo_type(vcard)
+        for w in photo_warnings:
+            print(f"  [{i}] Hinweis: Foto ist {w} groß - iCloud hat solche Fotos schon mit HTTP 403 abgelehnt")
         uid = extract_uid(vcard)
         if not uid:
             print(f"  [{i}] KEIN UID - übersprungen")
