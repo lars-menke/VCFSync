@@ -269,11 +269,15 @@ def fetch_vcard(session, url, retries=3):
 
 def extract_uid(vcard_text):
     """Extrahiert den UID-Wert aus einer vCard.
-    iCloud/Thunderbird-Altlasten kleben manchmal eine weitere Property direkt
-    an die UID (z.B. UID:...dbbX-ALT-NOTE:...). Solchen Property-Müll schneiden
-    wir ab, sonst passt die UID beim Import nicht und der Kontakt würde
-    fälschlich neu (dupliziert) angelegt."""
-    m = re.search(r"^UID[^:]*:(.+)$", vcard_text, re.MULTILINE)
+    Erst entfalten (RFC-6350-Fortsetzungszeilen zusammenführen) - sonst würden
+    lange UIDs (z.B. Outlook-GlobalObjectIds über zwei Zeilen) an der ersten
+    physischen Zeile abgeschnitten. iCloud/Thunderbird-Altlasten kleben
+    außerdem manchmal eine weitere Property direkt an die UID (z.B.
+    UID:...dbbX-ALT-NOTE:...). Solchen Property-Müll schneiden wir ab, sonst
+    passt die UID beim Import nicht und der Kontakt würde fälschlich neu
+    (dupliziert) angelegt."""
+    unfolded = "\n".join(unfold_vcard(vcard_text))
+    m = re.search(r"^UID[^:]*:(.+)$", unfolded, re.MULTILINE)
     if not m:
         return None
     uid = m.group(1).strip()
