@@ -250,17 +250,37 @@ def fetch_all_contact_hrefs(session, addressbook_url, verbose=True):
     return list(merged.items())
 
 
-def fetch_vcard(session, url):
-    """Lädt eine einzelne vCard per GET. Erwartet eine absolute URL."""
-    r = session.get(url, headers={"Accept": "text/vcard"})
-    r.raise_for_status()
-    return r.text
+def fetch_vcard(session, url, retries=3):
+    """Lädt eine einzelne vCard per GET. Erwartet eine absolute URL.
+    Wiederholt bei transienten Fehlern, damit der UID-Abgleich nicht durch
+    einzelne Aussetzer Kontakte übersieht (sonst würden sie als 'neu' gelten)."""
+    last = None
+    for attempt in range(retries):
+        try:
+            r = session.get(url, headers={"Accept": "text/vcard"}, timeout=30)
+            r.raise_for_status()
+            return r.text
+        except Exception as e:
+            last = e
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+    raise last
 
 
 def extract_uid(vcard_text):
-    """Extrahiert den UID-Wert aus einer vCard."""
+    """Extrahiert den UID-Wert aus einer vCard.
+    iCloud/Thunderbird-Altlasten kleben manchmal eine weitere Property direkt
+    an die UID (z.B. UID:...dbbX-ALT-NOTE:...). Solchen Property-Müll schneiden
+    wir ab, sonst passt die UID beim Import nicht und der Kontakt würde
+    fälschlich neu (dupliziert) angelegt."""
     m = re.search(r"^UID[^:]*:(.+)$", vcard_text, re.MULTILINE)
-    return m.group(1).strip() if m else None
+    if not m:
+        return None
+    uid = m.group(1).strip()
+    m2 = re.search(r"[A-Z][A-Z0-9-]*:", uid)  # angehängter Property-Name?
+    if m2 and m2.start() > 0:
+        uid = uid[:m2.start()]
+    return uid.strip()
 
 
 # ---------------------------------------------------------------------------
