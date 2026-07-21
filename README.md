@@ -51,7 +51,7 @@ aktualisiert (keine Duplikate), neue Kontakte werden angelegt.
 ## Lokale Nutzung
 
 ```bash
-pip install requests
+pip install -r requirements.txt
 
 # Export
 python icloud_contacts.py export --output meine_kontakte.vcf
@@ -71,6 +71,56 @@ python icloud_contacts.py delete --input zu_loeschen.vcf --dry-run
 > Hinweis: `import` kann Kontakte nur anlegen/aktualisieren, nicht entfernen.
 > Zum vollständigen Löschen von Kontakten dient `delete` (per HTTP DELETE).
 > Immer erst mit `--dry-run` prüfen — Löschen ist nicht umkehrbar.
+
+## Standard-Workflow: Kontakte in Excel bearbeiten
+
+Für größere Aufräumaktionen (Telefonlabels vereinheitlichen, Adressen
+korrigieren, Dubletten bereinigen ...) lohnt sich der Umweg über Excel statt
+die VCF von Hand zu editieren. Der komplette Zyklus:
+
+```bash
+# 1. Aktuellen Bestand aus iCloud holen
+python icloud_contacts.py export --output export.vcf
+
+# 2. In eine Excel-Liste wandeln
+python icloud_contacts.py to-excel --input export.vcf --output kontakte.xlsx
+
+# 3. kontakte.xlsx in Excel bearbeiten (siehe Spaltenformat unten)
+
+# 4. Bearbeitete Liste zurück in eine VCF wandeln
+python icloud_contacts.py from-excel --input kontakte.xlsx --output bearbeitet.vcf
+
+# 5. Prüfen, was sich ändern würde (kein Duplikat-Risiko eingehen!)
+python icloud_contacts.py import --input bearbeitet.vcf --dry-run
+
+# 6. Wirklich importieren
+python icloud_contacts.py import --input bearbeitet.vcf
+```
+
+**Spaltenformat in der Excel-Liste:**
+
+- Einfache Felder (Anzeigename, Nachname, Vorname, Organisation, Titel,
+  Geburtstag, Notiz, Kategorien ...): normaler Zellwert.
+- Telefone/E-Mails/Adressen/URLs: mehrere Einträge in einer Zelle, getrennt
+  durch ` | `, jeweils im Format `Label: Wert`, z. B.
+  `mobil: +49171234567 | Arbeit: +494412345`. Als Label gelten `mobil`,
+  `privat` und `Arbeit` mit fester Bedeutung — alles andere (z. B.
+  `Sonstige` oder ein eigener Text) wird als eigenes Apple-Label übernommen.
+- `UID`-Spalte **nicht verändern** (ist standardmäßig ausgeblendet) — sie
+  entscheidet beim Import, ob ein bestehender Kontakt aktualisiert oder ein
+  neuer angelegt wird. Eine leere UID-Zelle erzeugt einen neuen Kontakt.
+  Eine Zeile komplett löschen entfernt den Kontakt beim Import **nicht**
+  aus iCloud — dafür weiterhin `delete --uid <UID>` verwenden.
+- Foto liegt Base64-kodiert in den Spalten `Foto_Base64_1`, `_2`, ... (auf
+  mehrere Spalten aufgeteilt wegen Excels Zellenlimit von 32.767 Zeichen) —
+  normalerweise nicht von Hand bearbeiten.
+- Gruppen-Karten (z. B. "Familie", "Archiv") tauchen in der Excel-Liste
+  nicht auf, da sie auf dem iPhone ohnehin nicht einsehbar/bearbeitbar sind.
+
+> Adressen werden beim Zurückwandeln nur bestmöglich in Straße/PLZ/Ort
+> zerlegt (Excel enthält nur Fließtext pro Adresse) — die PLZ wird per
+> Mustererkennung herausgezogen, der Rest landet in der Straßen-Komponente.
+> Das reicht für iCloud/iPhone völlig aus.
 
 Zugangsdaten werden beim ersten Start abgefragt und optional in einer
 `.env`-Datei gespeichert, oder als Umgebungsvariablen gesetzt:
