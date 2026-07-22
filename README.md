@@ -24,8 +24,10 @@ Dann im Browser `http://127.0.0.1:5000` öffnen. Die Oberfläche bietet:
 - **Export** — ein Klick holt alle Kontakte inkl. Fotos aus iCloud, mit
   Fortschrittsbalken; danach als **VCF** oder direkt als **Excel** herunterladen.
 - **Import** — bearbeitete Datei (VCF oder die Excel-Liste) hochladen, erst
-  einen **Testlauf** machen (zeigt, was aktualisiert / neu angelegt / gelöscht
-  würde, ohne etwas zu schreiben), dann mit „Wirklich importieren“ übernehmen.
+  einen **Testlauf** machen, dann mit „Wirklich importieren“ übernehmen. Der
+  Testlauf zeigt, was neu angelegt / gelöscht würde und **welche Kontakte sich
+  inhaltlich wirklich ändern** (mit Namen und betroffenen Feldern) — nicht nur,
+  wie viele überschrieben werden.
 - **Löschen** — in der Excel-Liste ein `x` in die Spalte `Löschen` setzen; der
   Import entfernt diese Kontakte dann aus iCloud. Der Testlauf zeigt vorher
   deutlich an, wie viele gelöscht würden.

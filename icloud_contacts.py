@@ -629,6 +629,62 @@ def vcard_to_fields(card_lines):
     return d
 
 
+# Feldnamen für die Änderungsmeldung (in Anzeige-Reihenfolge)
+_COMPARE_LABELS = {
+    "Name": "Name", "Spitzname": "Spitzname", "Organisation": "Organisation",
+    "Titel": "Titel", "Geburtstag": "Geburtstag", "Notiz": "Notiz",
+    "Kategorien": "Kategorien", "Telefone": "Telefone", "E-Mails": "E-Mails",
+    "URLs": "URLs", "Adressen": "Adressen",
+}
+
+
+def _semantic_fields(vcard_text):
+    """Normalisiert eine vCard auf die inhaltlich relevanten Felder, so dass
+    sich zwei Karten vergleichen lassen, ohne dass Nebensächlichkeiten
+    (Property-Reihenfolge, iCloud-Serverfelder, unterschiedliche Faltung, doppelt
+    auftauchende PLZ nach dem Excel-Rundlauf) als Änderung durchschlagen.
+    Fotos werden bewusst ausgeklammert (ändern sich praktisch nie über Excel).
+    """
+    d = vcard_to_fields(unfold_vcard(vcard_text))
+
+    def as_set(items):
+        return tuple(sorted(x.strip() for x in items if x.strip()))
+
+    def adr_tokens(items):
+        # "label: Freitext" -> label + alphabetisch sortierte, eindeutige Wörter.
+        # Neutralisiert Reihenfolge und die nach dem Rundlauf doppelte PLZ.
+        out = []
+        for it in items:
+            label, _, val = it.partition(":")
+            toks = " ".join(sorted(set(val.split())))
+            out.append(f"{label.strip().lower()}|{toks}")
+        return tuple(sorted(out))
+
+    return {
+        "Name": (d["FN"].strip(), d["Nachname"].strip(), d["Vorname"].strip(),
+                 d["Zusatz"].strip(), d["Praefix"].strip(), d["Suffix"].strip()),
+        "Spitzname": d["Nick"].strip(),
+        "Organisation": (d["ORG"].strip(), d["Abt"].strip()),
+        "Titel": d["Titel"].strip(),
+        "Geburtstag": d["BDAY"].strip(),
+        "Notiz": d["NOTE"].strip(),
+        "Kategorien": d["CAT"].strip(),
+        "Telefone": as_set(d["TEL"]),
+        "E-Mails": as_set(d["EMAIL"]),
+        "URLs": as_set(d["URL"]),
+        "Adressen": adr_tokens(d["ADR"]),
+    }
+
+
+def changed_fields(old_vcard, new_vcard):
+    """Gibt die Liste der Felder zurück, die sich zwischen alter (iCloud) und
+    neuer (Import) Karte inhaltlich unterscheiden. Leere Liste = keine echte
+    Änderung (der PUT würde denselben Inhalt schreiben)."""
+    a = _semantic_fields(old_vcard)
+    b = _semantic_fields(new_vcard)
+    return [_COMPARE_LABELS[k] for k in _COMPARE_LABELS if a.get(k) != b.get(k)]
+
+
 def cmd_to_excel(args):
     text = Path(args.input).read_text(encoding="utf-8")
     cards = split_vcards(text)
@@ -881,7 +937,7 @@ def split_vcards(text):
     return cards
 
 
-def fetch_existing_uids(session, addressbook_urls):
+def fetch_existing_uids(session, addressbook_urls, content_out=None):
     """
     Gibt Dict {uid: href} aller vorhandenen Kontakte zurück.
     Lädt dazu jede vCard und liest die UID.
@@ -890,6 +946,11 @@ def fetch_existing_uids(session, addressbook_urls):
     (url, name)-Tupeln sein. Wie beim Export werden ALLE Adressbücher
     durchsucht - sonst gelten Kontakte aus einem zweiten Adressbuch beim
     Import fälschlich als "neu" (Duplikat-Risiko).
+
+    Wird ein Dict content_out übergeben, wird es mit {uid: vcard_text} gefüllt -
+    die Karten werden ohnehin geladen, das kostet keine zusätzlichen Zugriffe.
+    Damit lässt sich beim Import feststellen, welche Kontakte sich wirklich
+    ändern (statt nur "vorhanden, wird überschrieben").
     """
     if isinstance(addressbook_urls, str):
         addressbook_urls = [(addressbook_urls, "")]
@@ -909,6 +970,8 @@ def fetch_existing_uids(session, addressbook_urls):
             uid = extract_uid(vcard)
             if uid:
                 uid_map[uid] = href
+                if content_out is not None:
+                    content_out[uid] = vcard
         except Exception as e:
             print(f"\n  WARNUNG: {href}: {e}")
         time.sleep(0.05)
@@ -936,10 +999,13 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
     Gibt ein Dict zurück: updated, created, errors, total, log.
     """
     # Vorhandene UIDs aus ALLEN Adressbüchern laden (nicht nur dem ersten -
-    # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu)
-    uid_map = fetch_existing_uids(session, books)
+    # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu).
+    # Karteninhalte gleich mit erfassen, um echte Änderungen zu erkennen.
+    existing_content = {}
+    uid_map = fetch_existing_uids(session, books, content_out=existing_content)
 
-    updated = created = deleted = errors = 0
+    updated = created = deleted = errors = changed = 0
+    changed_list = []
     log = []
     total = len(vcards)
 
@@ -947,6 +1013,10 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
         log.append(message)
         if progress:
             progress(i, total, message)
+
+    def fn_of(vcard_text):
+        m = re.search(r"^FN:(.+)$", "\n".join(unfold_vcard(vcard_text)), re.MULTILINE)
+        return m.group(1).strip() if m else ""
 
     for i, vcard in enumerate(vcards, 1):
         vcard, photo_warnings = normalize_photo_type(vcard)
@@ -982,13 +1052,25 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
         if uid in uid_map:
             # Update: vorhandener Kontakt (uid_map enthält bereits absolute URLs)
             url = uid_map[uid]
+            old = existing_content.get(uid)
+            fields = changed_fields(old, vcard) if old is not None else None
+            if fields:  # unterscheidet sich wirklich vom iCloud-Stand
+                changed += 1
+                changed_list.append({"name": fn_of(vcard) or uid[:12], "fields": fields})
+            # Kennzeichnung in der Statuszeile: geändert / unverändert / unbekannt
+            if fields:
+                tag = f" [geändert: {', '.join(fields)}]"
+            elif fields == []:
+                tag = " [unverändert]"
+            else:
+                tag = ""
             if dry_run:
-                emit(i, f"[{i}] (dry-run) WÜRDE AKTUALISIEREN: {uid[:20]}...")
+                emit(i, f"[{i}] (dry-run) WÜRDE AKTUALISIEREN{tag}: {uid[:20]}...")
                 updated += 1
                 continue
             r = put_vcard(session, url, vcard)
             if r.status_code in (200, 201, 204):
-                emit(i, f"[{i}] AKTUALISIERT: {uid[:20]}...")
+                emit(i, f"[{i}] AKTUALISIERT{tag}: {uid[:20]}...")
                 updated += 1
             else:
                 emit(i, f"[{i}] FEHLER Update {r.status_code}: {uid[:20]}")
@@ -1013,6 +1095,7 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
             time.sleep(0.1)  # sanftes Rate-Limiting
 
     return {"updated": updated, "created": created, "deleted": deleted,
+            "changed": changed, "changed_list": changed_list,
             "errors": errors, "total": total, "log": log}
 
 
@@ -1029,9 +1112,14 @@ def cmd_import(args, session, books, primary_url):
     result = import_vcards(session, books, primary_url, vcards, dry_run=dry_run,
                            progress=lambda i, total, message: print(f"  {message}"))
 
-    print(f"\nFertig: {result['updated']} aktualisiert, "
+    print(f"\nFertig: {result['updated']} aktualisiert "
+          f"(davon {result['changed']} inhaltlich geändert), "
           f"{result['created']} neu, {result['deleted']} gelöscht, "
           f"{result['errors']} Fehler.")
+    if result["changed_list"]:
+        print("\nGeänderte Kontakte:")
+        for c in result["changed_list"]:
+            print(f"  - {c['name']}: {', '.join(c['fields'])}")
 
 
 # ---------------------------------------------------------------------------

@@ -143,11 +143,16 @@ def _run_import(dry_run):
                       if any(k in l for k in ("NEU ANLEGEN", "NEU ANGELEGT", "LÖSCHEN",
                                               "GELÖSCHT", "FEHLER", "Hinweis"))]
 
+        # Liste der wirklich geänderten Kontakte (Name + betroffene Felder)
+        changes = [f"{c['name']}: {', '.join(c['fields'])}" for c in result["changed_list"]]
+
         _job_finish(result={
             "dry_run": dry_run,
             "updated": result["updated"],
             "created": result["created"],
             "deleted": result["deleted"],
+            "changed": result["changed"],
+            "changes": changes,
             "errors": result["errors"],
             "total": result["total"],
             "highlights": highlights,
@@ -383,6 +388,9 @@ async function refresh(){
     document.getElementById('btnReal').disabled = res.dry_run ? false : true;
     let hl = res.highlights && res.highlights.length
       ? '<div class="hl">'+ res.highlights.join('\\n') +'</div>' : '';
+    let changeList = (res.changes && res.changes.length)
+      ? '<p class="muted" style="margin:.75rem 0 .25rem">Geänderte Kontakte:</p>' +
+        '<div class="hl">'+ res.changes.join('\\n') +'</div>' : '';
     let head = res.dry_run
       ? '<strong>Testlauf-Ergebnis (nichts geschrieben):</strong>'
       : '<strong class="ok">Import abgeschlossen.</strong>';
@@ -392,11 +400,14 @@ async function refresh(){
       ? '<p class="muted">Sieht das gut aus? Dann auf „Wirklich importieren“.</p>' : '';
     s.innerHTML = '<div class="card">'+ head +
       '<div class="counts">' +
-      '<div><div class="big">'+res.updated+'</div>aktualisiert</div>' +
+      '<div><div class="big">'+res.changed+'</div>geändert</div>' +
       '<div><div class="big">'+res.created+'</div>neu</div>' +
       '<div><div class="big '+(res.deleted?'bad':'')+'">'+res.deleted+'</div>gelöscht</div>' +
       '<div><div class="big '+(res.errors?'bad':'')+'">'+res.errors+'</div>Fehler</div>' +
-      '</div>'+ delWarn + hint + hl +'</div>';
+      '</div>' +
+      '<p class="muted">'+res.updated+' vorhandene Kontakte geprüft, davon '+res.changed+
+      ' inhaltlich geändert.</p>' +
+      delWarn + hint + changeList + hl +'</div>';
   }
 }
 
