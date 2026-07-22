@@ -1,3 +1,5 @@
 .env
 *.vcf
+*.xlsx
+web_data/
 __pycache__/

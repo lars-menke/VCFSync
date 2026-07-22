@@ -6,6 +6,40 @@ exportierte VCF-Datei als downloadbares Artifact bereit. Der Import spielt eine
 bearbeitete VCF zurück nach iCloud — vorhandene Kontakte werden anhand der UID
 aktualisiert (keine Duplikate), neue Kontakte werden angelegt.
 
+Für den bequemen Alltag gibt es zusätzlich eine **Web-Oberfläche** mit Buttons
+(siehe unten), die Export und Import ohne Kommandozeile erledigt.
+
+## Web-Oberfläche (empfohlen)
+
+Statt die Befehle einzeln einzutippen, lässt sich alles per Knopfdruck über
+eine kleine lokale Web-App bedienen:
+
+```bash
+pip install -r requirements.txt
+python icloud_web.py
+```
+
+Dann im Browser `http://127.0.0.1:5000` öffnen. Die Oberfläche bietet:
+
+- **Export** — ein Klick holt alle Kontakte inkl. Fotos aus iCloud, mit
+  Fortschrittsbalken; danach als **VCF** oder direkt als **Excel** herunterladen.
+- **Import** — bearbeitete Datei (VCF oder die Excel-Liste) hochladen, erst
+  einen **Testlauf** machen (zeigt, was aktualisiert/neu angelegt würde, ohne
+  etwas zu schreiben), dann mit „Wirklich importieren“ übernehmen.
+
+Die App nutzt dieselbe Kernlogik wie das CLI und dieselben Zugangsdaten aus der
+`.env`-Datei bzw. den Umgebungsvariablen.
+
+> **Wo läuft das?**
+> - **GitHub Codespaces** (siehe unten): nach `python icloud_web.py` blendet
+>   VS Code eine Meldung „Im Browser öffnen“ für Port 5000 ein — anklicken.
+> - **a-Shell auf dem iPhone**: App starten, dann in Safari auf demselben
+>   Gerät `http://127.0.0.1:5000` öffnen.
+> - **Lokal am PC**: einfach den Browser auf `http://127.0.0.1:5000`.
+>
+> Die App hat bewusst **keine Anmeldung** und ist nur für die lokale,
+> persönliche Nutzung gedacht. Den Port nicht öffentlich freigeben.
+
 ## Einrichtung
 
 1. **Repository als privat anlegen** — Kontaktdaten sind sensibel.

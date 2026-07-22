@@ -431,26 +431,29 @@ def embed_photos(session, vcard_text):
 # Export
 # ---------------------------------------------------------------------------
 
-def cmd_export(args, session, addressbook_urls):
-    output = Path(args.output)
-    # Über ALLE Adressbücher hinweg sammeln und per URL vereinigen.
+def export_contacts(session, addressbook_urls, embed=True, progress=None):
+    """Kernlogik des Exports (ohne Datei-/Konsolenausgabe), damit sowohl die
+    CLI als auch die Web-Oberfläche denselben Code nutzen.
+
+    progress(i, total) wird pro geladenem Kontakt aufgerufen (optional).
+    Gibt ein Dict zurück: text, total, loaded, photos, warnings.
+    """
     if isinstance(addressbook_urls, str):
         addressbook_urls = [(addressbook_urls, "")]
-    print(f"Durchsuche {len(addressbook_urls)} Adressbuch/Adressbücher ...")
+
     href_map = {}
     for ab_url, ab_name in addressbook_urls:
-        print(f"  Adressbuch '{ab_name}':")
         for href, etag in fetch_all_contact_hrefs(session, ab_url):
             href_map.setdefault(href, etag)
     hrefs = list(href_map.items())
     total = len(hrefs)
-    print(f"{total} Kontakte gefunden (über alle Adressbücher).")
 
-    embed = not getattr(args, "skip_photos", False)
     photo_count = 0
     vcards = []
+    warnings = []
     for i, (href, etag) in enumerate(hrefs, 1):
-        print(f"\r  Lade {i}/{total} ...", end="", flush=True)
+        if progress:
+            progress(i, total)
         try:
             vcard = fetch_vcard(session, href)
             if embed:
@@ -460,15 +463,40 @@ def cmd_export(args, session, addressbook_urls):
                 photo_count += n
             vcards.append(vcard.strip())
         except Exception as e:
-            print(f"\n  WARNUNG: {href} konnte nicht geladen werden: {e}")
+            warnings.append(f"{href} konnte nicht geladen werden: {e}")
         time.sleep(0.05)  # sanftes Rate-Limiting
 
-    print(f"\n{len(vcards)} Kontakte geladen.")
-    if embed:
-        print(f"{photo_count} Fotos als Base64 eingebettet.")
+    return {
+        "text": "\r\n".join(vcards) + "\r\n",
+        "total": total,
+        "loaded": len(vcards),
+        "photos": photo_count,
+        "warnings": warnings,
+    }
 
-    combined = "\r\n".join(vcards) + "\r\n"
-    output.write_text(combined, encoding="utf-8")
+
+def cmd_export(args, session, addressbook_urls):
+    output = Path(args.output)
+    embed = not getattr(args, "skip_photos", False)
+
+    if isinstance(addressbook_urls, str):
+        books = [(addressbook_urls, "")]
+    else:
+        books = addressbook_urls
+    print(f"Durchsuche {len(books)} Adressbuch/Adressbücher ...")
+
+    def progress(i, total):
+        print(f"\r  Lade {i}/{total} ...", end="", flush=True)
+
+    result = export_contacts(session, books, embed=embed, progress=progress)
+
+    for w in result["warnings"]:
+        print(f"\n  WARNUNG: {w}")
+    print(f"\n{result['loaded']} Kontakte geladen.")
+    if embed:
+        print(f"{result['photos']} Fotos als Base64 eingebettet.")
+
+    output.write_text(result["text"], encoding="utf-8")
     print(f"Gespeichert: {output} ({output.stat().st_size / 1024:.1f} KB)")
 
 
@@ -857,6 +885,75 @@ def put_vcard(session, url, vcard_text, etag=None):
     return r
 
 
+def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=None):
+    """Kernlogik des Imports (ohne Datei-/Konsolenausgabe), gemeinsam genutzt
+    von CLI und Web-Oberfläche.
+
+    progress(i, total, message) wird pro Kontakt aufgerufen (optional); message
+    ist die fertig formatierte Statuszeile (z.B. "[3] AKTUALISIERT: ...").
+    Gibt ein Dict zurück: updated, created, errors, total, log.
+    """
+    # Vorhandene UIDs aus ALLEN Adressbüchern laden (nicht nur dem ersten -
+    # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu)
+    uid_map = fetch_existing_uids(session, books)
+
+    updated = created = errors = 0
+    log = []
+    total = len(vcards)
+
+    def emit(i, message):
+        log.append(message)
+        if progress:
+            progress(i, total, message)
+
+    for i, vcard in enumerate(vcards, 1):
+        vcard, photo_warnings = normalize_photo_type(vcard)
+        for w in photo_warnings:
+            emit(i, f"[{i}] Hinweis: Foto ist {w} groß - iCloud hat solche Fotos schon mit HTTP 403 abgelehnt")
+
+        uid = extract_uid(vcard)
+        if not uid:
+            emit(i, f"[{i}] KEIN UID - übersprungen")
+            errors += 1
+            continue
+
+        if uid in uid_map:
+            # Update: vorhandener Kontakt (uid_map enthält bereits absolute URLs)
+            url = uid_map[uid]
+            if dry_run:
+                emit(i, f"[{i}] (dry-run) WÜRDE AKTUALISIEREN: {uid[:20]}...")
+                updated += 1
+                continue
+            r = put_vcard(session, url, vcard)
+            if r.status_code in (200, 201, 204):
+                emit(i, f"[{i}] AKTUALISIERT: {uid[:20]}...")
+                updated += 1
+            else:
+                emit(i, f"[{i}] FEHLER Update {r.status_code}: {uid[:20]}")
+                errors += 1
+        else:
+            # Neuanlage: neue .vcf-Ressource im Adressbuch
+            safe_uid = re.sub(r"[^a-zA-Z0-9\-]", "", uid)
+            url = primary_url.rstrip("/") + f"/{safe_uid}.vcf"
+            if dry_run:
+                emit(i, f"[{i}] (dry-run) WÜRDE NEU ANLEGEN: {uid[:20]}...")
+                created += 1
+                continue
+            r = put_vcard(session, url, vcard)
+            if r.status_code in (200, 201, 204):
+                emit(i, f"[{i}] NEU ANGELEGT: {uid[:20]}...")
+                created += 1
+            else:
+                emit(i, f"[{i}] FEHLER Neuanlage {r.status_code}: {uid[:20]}")
+                errors += 1
+
+        if not dry_run:
+            time.sleep(0.1)  # sanftes Rate-Limiting
+
+    return {"updated": updated, "created": created, "errors": errors,
+            "total": total, "log": log}
+
+
 def cmd_import(args, session, books, primary_url):
     input_file = Path(args.input)
     if not input_file.exists():
@@ -866,60 +963,12 @@ def cmd_import(args, session, books, primary_url):
     vcards = split_vcards(input_file.read_text(encoding="utf-8"))
     print(f"{len(vcards)} Kontakte in {input_file} gefunden.")
 
-    # Vorhandene UIDs aus ALLEN Adressbüchern laden (nicht nur dem ersten -
-    # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu)
-    uid_map = fetch_existing_uids(session, books)
-    addressbook_url = primary_url  # Ziel für Neuanlagen
-
     dry_run = getattr(args, "dry_run", False)
+    result = import_vcards(session, books, primary_url, vcards, dry_run=dry_run,
+                           progress=lambda i, total, message: print(f"  {message}"))
 
-    updated = 0
-    created = 0
-    errors  = 0
-
-    for i, vcard in enumerate(vcards, 1):
-        vcard, photo_warnings = normalize_photo_type(vcard)
-        for w in photo_warnings:
-            print(f"  [{i}] Hinweis: Foto ist {w} groß - iCloud hat solche Fotos schon mit HTTP 403 abgelehnt")
-        uid = extract_uid(vcard)
-        if not uid:
-            print(f"  [{i}] KEIN UID - übersprungen")
-            errors += 1
-            continue
-
-        if uid in uid_map:
-            # Update: vorhandener Kontakt (uid_map enthält bereits absolute URLs)
-            url = uid_map[uid]
-            if dry_run:
-                print(f"  [{i}] (dry-run) WÜRDE AKTUALISIEREN: {uid[:20]}...")
-                updated += 1
-                continue
-            r = put_vcard(session, url, vcard)
-            if r.status_code in (200, 201, 204):
-                print(f"  [{i}] AKTUALISIERT: {uid[:20]}...")
-                updated += 1
-            else:
-                print(f"  [{i}] FEHLER Update {r.status_code}: {uid[:20]}")
-                errors += 1
-        else:
-            # Neuanlage: neue .vcf-Ressource im Adressbuch
-            safe_uid = re.sub(r"[^a-zA-Z0-9\-]", "", uid)
-            url = addressbook_url.rstrip("/") + f"/{safe_uid}.vcf"
-            if dry_run:
-                print(f"  [{i}] (dry-run) WÜRDE NEU ANLEGEN: {uid[:20]}...")
-                created += 1
-                continue
-            r = put_vcard(session, url, vcard)
-            if r.status_code in (200, 201, 204):
-                print(f"  [{i}] NEU ANGELEGT: {uid[:20]}...")
-                created += 1
-            else:
-                print(f"  [{i}] FEHLER Neuanlage {r.status_code}: {uid[:20]}")
-                errors += 1
-
-        time.sleep(0.1)  # sanftes Rate-Limiting
-
-    print(f"\nFertig: {updated} aktualisiert, {created} neu, {errors} Fehler.")
+    print(f"\nFertig: {result['updated']} aktualisiert, "
+          f"{result['created']} neu, {result['errors']} Fehler.")
 
 
 # ---------------------------------------------------------------------------

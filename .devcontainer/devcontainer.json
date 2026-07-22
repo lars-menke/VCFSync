@@ -2,6 +2,13 @@
   "name": "iCloud Kontakte Sync",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
   "postCreateCommand": "pip install -r requirements.txt",
+  "forwardPorts": [5000],
+  "portsAttributes": {
+    "5000": {
+      "label": "iCloud Kontakte Sync (Web-Oberfläche)",
+      "onAutoForward": "openBrowser"
+    }
+  },
   "customizations": {
     "vscode": {
       "extensions": ["ms-python.python"]
