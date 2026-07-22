@@ -140,12 +140,14 @@ def _run_import(dry_run):
             return line
 
         highlights = [enrich(l) for l in result["log"]
-                      if "NEU ANLEGEN" in l or "NEU ANGELEGT" in l or "FEHLER" in l or "Hinweis" in l]
+                      if any(k in l for k in ("NEU ANLEGEN", "NEU ANGELEGT", "LÖSCHEN",
+                                              "GELÖSCHT", "FEHLER", "Hinweis"))]
 
         _job_finish(result={
             "dry_run": dry_run,
             "updated": result["updated"],
             "created": result["created"],
+            "deleted": result["deleted"],
             "errors": result["errors"],
             "total": result["total"],
             "highlights": highlights,
@@ -384,14 +386,17 @@ async function refresh(){
     let head = res.dry_run
       ? '<strong>Testlauf-Ergebnis (nichts geschrieben):</strong>'
       : '<strong class="ok">Import abgeschlossen.</strong>';
+    let delWarn = (res.dry_run && res.deleted)
+      ? '<p class="bad">Achtung: '+res.deleted+' Kontakt(e) würden gelöscht (siehe unten).</p>' : '';
     let hint = res.dry_run
       ? '<p class="muted">Sieht das gut aus? Dann auf „Wirklich importieren“.</p>' : '';
     s.innerHTML = '<div class="card">'+ head +
       '<div class="counts">' +
       '<div><div class="big">'+res.updated+'</div>aktualisiert</div>' +
       '<div><div class="big">'+res.created+'</div>neu</div>' +
+      '<div><div class="big '+(res.deleted?'bad':'')+'">'+res.deleted+'</div>gelöscht</div>' +
       '<div><div class="big '+(res.errors?'bad':'')+'">'+res.errors+'</div>Fehler</div>' +
-      '</div>'+ hint + hl +'</div>';
+      '</div>'+ delWarn + hint + hl +'</div>';
   }
 }
 

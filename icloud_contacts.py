@@ -514,10 +514,30 @@ def cmd_export(args, session, addressbook_urls):
 # andere wird als eigenes Apple-Label (X-ABLabel) übernommen.
 
 EXCEL_COLUMNS = [
-    "UID", "Anzeigename", "Nachname", "Vorname", "Namenszusatz", "Praefix", "Suffix",
+    "UID", "Löschen", "Anzeigename", "Nachname", "Vorname", "Namenszusatz", "Praefix", "Suffix",
     "Spitzname", "Organisation", "Abteilung", "Titel", "Telefone", "E-Mails",
     "Adressen", "Geburtstag", "URLs", "Notiz", "Kategorien",
 ]
+
+# Marker-Property in der vCard: markiert einen Kontakt zum Löschen aus iCloud.
+# Wird beim Import ausgewertet (DELETE statt PUT) und danach ignoriert.
+DELETE_MARKER = "X-VCFSYNC-DELETE"
+
+# Zell-Werte in der Spalte "Löschen", die als "ja, löschen" gelten.
+_DELETE_TRUE = {"x", " x", "ja", "j", "1", "true", "wahr", "yes", "y", "löschen"}
+
+
+def _cell_is_delete(value):
+    return str(value or "").strip().lower() in _DELETE_TRUE
+
+
+def wants_delete(vcard_text):
+    """True, wenn die vCard den Lösch-Marker trägt."""
+    for l in unfold_vcard(vcard_text):
+        head, sep, val = l.partition(":")
+        if sep and head.split(";")[0].split(".")[-1].upper() == DELETE_MARKER:
+            return val.strip() not in ("", "0", "false")
+    return False
 
 _ABLABEL_RE = re.compile(r"_\$!<(.+?)>!\$_")
 _TEL_LABELS = {"CELL": "mobil", "HOME": "privat", "WORK": "Arbeit"}
@@ -646,14 +666,15 @@ def cmd_to_excel(args):
         photo_chunks = [d["PHOTO_B64"][i:i + chunk] for i in range(0, len(d["PHOTO_B64"]), chunk)]
         photo_chunks += [""] * (max_chunks - len(photo_chunks))
         ws.append([
-            d["UID"], d["FN"], d["Nachname"], d["Vorname"], d["Zusatz"], d["Praefix"], d["Suffix"],
+            d["UID"], "", d["FN"], d["Nachname"], d["Vorname"], d["Zusatz"], d["Praefix"], d["Suffix"],
             d["Nick"], d["ORG"], d["Abt"], d["Titel"], " | ".join(d["TEL"]), " | ".join(d["EMAIL"]),
             " | ".join(d["ADR"]), d["BDAY"], " | ".join(d["URL"]), d["NOTE"], d["CAT"],
         ] + photo_chunks)
 
-    ws.freeze_panes = "B2"
+    ws.freeze_panes = "C2"  # Zeile 1 + UID/Löschen bleiben beim Scrollen sichtbar
     ws.auto_filter.ref = f"A1:{get_column_letter(len(EXCEL_COLUMNS))}{len(rows) + 1}"
-    widths = [38, 22, 16, 14, 12, 8, 8, 14, 22, 16, 14, 40, 34, 40, 12, 26, 30, 20]
+    #        UID Lösch Anz  Nach Vor  Zus Präf Suf Spitz Org  Abt Tit  Tel E-M Adr BDay URL Notiz Kat
+    widths = [38, 9,   22,  16,  14,  12, 8,   8,  14,   22,  16, 14,  40, 34, 40, 12,  26, 30,   20]
     for col, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
     for i in range(max_chunks):
@@ -738,6 +759,15 @@ def row_to_vcard(row, col_index, photo_cols):
         return "" if v is None else str(v).strip()
 
     uid = g("UID") or str(uuid.uuid4())
+
+    # Zum Löschen markiert? Dann nur eine schlanke Karte mit Marker erzeugen -
+    # der Import löscht sie in iCloud (per UID), statt sie zu schreiben.
+    if _cell_is_delete(g("Löschen")):
+        fn = g("Anzeigename") or " ".join(x for x in (g("Vorname"), g("Nachname")) if x)
+        lines = ["BEGIN:VCARD", "VERSION:3.0", f"UID:{uid}",
+                 f"FN:{_vesc(fn)}", f"{DELETE_MARKER}:1", "END:VCARD"]
+        return "\r\n".join(fold_line(l) for l in lines)
+
     lines = ["BEGIN:VCARD", "VERSION:3.0", f"UID:{uid}"]
 
     fn = g("Anzeigename")
@@ -797,29 +827,41 @@ def cmd_from_excel(args):
     col_index = {h: i for i, h in enumerate(header)}
     photo_cols = [h for h in header if h.startswith("Foto_Base64_")]
 
-    missing = [c for c in EXCEL_COLUMNS if c not in col_index]
+    # "Löschen" ist optional - alte Excel-Dateien (ohne die Spalte) bleiben gültig.
+    required = [c for c in EXCEL_COLUMNS if c != "Löschen"]
+    missing = [c for c in required if c not in col_index]
     if missing:
         print(f"Fehlende Spalten in {args.input}: {', '.join(missing)}")
         print("Wurde die Datei mit 'to-excel' erzeugt und nicht umbenannt/umsortiert?")
         sys.exit(1)
 
+    del_col = col_index.get("Löschen")
+
     cards = []
     skipped = 0
+    marked_delete = 0
     for row in rows[1:]:
         if row is None or all(v is None for v in row):
             continue
+        is_delete = del_col is not None and _cell_is_delete(row[del_col] if del_col < len(row) else None)
         has_name = any(
             str(row[col_index[c]] or "").strip()
             for c in ("Anzeigename", "Nachname", "Vorname")
         )
-        if not has_name:
+        if not has_name and not is_delete:
             skipped += 1
             continue
         cards.append(row_to_vcard(row, col_index, photo_cols))
+        if is_delete:
+            marked_delete += 1
 
     Path(args.output).write_text("\r\n".join(cards) + "\r\n", encoding="utf-8")
-    suffix = f", {skipped} leere Zeile(n) übersprungen" if skipped else ""
-    print(f"{len(cards)} Kontakte geschrieben{suffix}.")
+    parts = [f"{len(cards)} Kontakte geschrieben"]
+    if marked_delete:
+        parts.append(f"davon {marked_delete} zum Löschen markiert")
+    if skipped:
+        parts.append(f"{skipped} leere Zeile(n) übersprungen")
+    print(", ".join(parts) + ".")
     print(f"Gespeichert: {args.output}")
 
 
@@ -897,7 +939,7 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
     # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu)
     uid_map = fetch_existing_uids(session, books)
 
-    updated = created = errors = 0
+    updated = created = deleted = errors = 0
     log = []
     total = len(vcards)
 
@@ -915,6 +957,26 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
         if not uid:
             emit(i, f"[{i}] KEIN UID - übersprungen")
             errors += 1
+            continue
+
+        # Zum Löschen markiert: Kontakt aus iCloud entfernen (DELETE statt PUT)
+        if wants_delete(vcard):
+            if uid not in uid_map:
+                emit(i, f"[{i}] LÖSCHEN übersprungen (nicht in iCloud): {uid[:20]}...")
+                continue
+            url = uid_map[uid]
+            if dry_run:
+                emit(i, f"[{i}] (dry-run) WÜRDE LÖSCHEN: {uid[:20]}...")
+                deleted += 1
+                continue
+            r = delete_contact(session, url)
+            if r.status_code in (200, 204):
+                emit(i, f"[{i}] GELÖSCHT: {uid[:20]}...")
+                deleted += 1
+            else:
+                emit(i, f"[{i}] FEHLER Löschen {r.status_code}: {uid[:20]}")
+                errors += 1
+            time.sleep(0.1)
             continue
 
         if uid in uid_map:
@@ -950,8 +1012,8 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
         if not dry_run:
             time.sleep(0.1)  # sanftes Rate-Limiting
 
-    return {"updated": updated, "created": created, "errors": errors,
-            "total": total, "log": log}
+    return {"updated": updated, "created": created, "deleted": deleted,
+            "errors": errors, "total": total, "log": log}
 
 
 def cmd_import(args, session, books, primary_url):
@@ -968,7 +1030,8 @@ def cmd_import(args, session, books, primary_url):
                            progress=lambda i, total, message: print(f"  {message}"))
 
     print(f"\nFertig: {result['updated']} aktualisiert, "
-          f"{result['created']} neu, {result['errors']} Fehler.")
+          f"{result['created']} neu, {result['deleted']} gelöscht, "
+          f"{result['errors']} Fehler.")
 
 
 # ---------------------------------------------------------------------------
