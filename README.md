@@ -24,8 +24,11 @@ Dann im Browser `http://127.0.0.1:5000` öffnen. Die Oberfläche bietet:
 - **Export** — ein Klick holt alle Kontakte inkl. Fotos aus iCloud, mit
   Fortschrittsbalken; danach als **VCF** oder direkt als **Excel** herunterladen.
 - **Import** — bearbeitete Datei (VCF oder die Excel-Liste) hochladen, erst
-  einen **Testlauf** machen (zeigt, was aktualisiert/neu angelegt würde, ohne
-  etwas zu schreiben), dann mit „Wirklich importieren“ übernehmen.
+  einen **Testlauf** machen (zeigt, was aktualisiert / neu angelegt / gelöscht
+  würde, ohne etwas zu schreiben), dann mit „Wirklich importieren“ übernehmen.
+- **Löschen** — in der Excel-Liste ein `x` in die Spalte `Löschen` setzen; der
+  Import entfernt diese Kontakte dann aus iCloud. Der Testlauf zeigt vorher
+  deutlich an, wie viele gelöscht würden.
 
 Die App nutzt dieselbe Kernlogik wie das CLI und dieselben Zugangsdaten aus der
 `.env`-Datei bzw. den Umgebungsvariablen.
@@ -153,8 +156,11 @@ python icloud_contacts.py import --input bearbeitet.vcf
 - `UID`-Spalte **nicht verändern** (ist standardmäßig ausgeblendet) — sie
   entscheidet beim Import, ob ein bestehender Kontakt aktualisiert oder ein
   neuer angelegt wird. Eine leere UID-Zelle erzeugt einen neuen Kontakt.
-  Eine Zeile komplett löschen entfernt den Kontakt beim Import **nicht**
-  aus iCloud — dafür weiterhin `delete --uid <UID>` verwenden.
+- **Spalte `Löschen`**: ein `x` (oder `ja`) in dieser Zelle löscht den Kontakt
+  beim Import aus iCloud. Nur genau markierte Kontakte werden entfernt — eine
+  Zeile einfach zu löschen genügt **nicht** (dann bleibt der Kontakt in iCloud).
+  Der Testlauf zeigt vorab, was gelöscht würde. Alternativ zum gezielten
+  Entfernen weiterhin `delete --uid <UID>` möglich.
 - Foto liegt Base64-kodiert in den Spalten `Foto_Base64_1`, `_2`, ... (auf
   mehrere Spalten aufgeteilt wegen Excels Zellenlimit von 32.767 Zeichen) —
   normalerweise nicht von Hand bearbeiten.
