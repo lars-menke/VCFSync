@@ -695,13 +695,40 @@ def _semantic_fields(vcard_text):
     }
 
 
+def _adr_key(vcard_text):
+    """Strukturierte Adress-Komponenten (Straße, Ort, PLZ, Land) je Adresse.
+    Erkennt auch reine Umstrukturierungen - z.B. wenn bisher die ganze Adresse
+    in der Straße stand und jetzt sauber auf Straße/Ort/PLZ getrennt wird -,
+    die ein reiner Wort-Mengen-Vergleich übersieht. Region/Postfach/Zusatz
+    werden ignoriert (die setzt der Import ohnehin nicht)."""
+    keys = []
+    for l in unfold_vcard(vcard_text):
+        head, sep, val = l.partition(":")
+        if not sep or head.split(";")[0].split(".")[-1].upper() != "ADR":
+            continue
+        p = (val.split(";") + [""] * 7)[:7]
+        street = _dedupe_zip(re.sub(r"\s+", " ", p[2].replace("\\,", ",")).strip())
+        city = re.sub(r"\s+", " ", p[3].replace("\\,", ",")).strip()
+        keys.append((street.lower(), city.lower(), p[5].strip(), p[6].strip().lower()))
+    return tuple(sorted(keys))
+
+
 def changed_fields(old_vcard, new_vcard):
     """Gibt die Liste der Felder zurück, die sich zwischen alter (iCloud) und
     neuer (Import) Karte inhaltlich unterscheiden. Leere Liste = keine echte
     Änderung (der PUT würde denselben Inhalt schreiben)."""
     a = _semantic_fields(old_vcard)
     b = _semantic_fields(new_vcard)
-    return [_COMPARE_LABELS[k] for k in _COMPARE_LABELS if a.get(k) != b.get(k)]
+    out = []
+    for k, label in _COMPARE_LABELS.items():
+        if k == "Adressen":
+            # Adressen strukturell vergleichen (nicht nur als Wort-Menge),
+            # damit auch das saubere Trennen von Straße/Ort/PLZ sichtbar wird.
+            if _adr_key(old_vcard) != _adr_key(new_vcard):
+                out.append(label)
+        elif a.get(k) != b.get(k):
+            out.append(label)
+    return out
 
 
 def cmd_to_excel(args):
