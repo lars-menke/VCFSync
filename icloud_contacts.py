@@ -340,20 +340,16 @@ def _photo_subtype(content_type, data):
     return "JPEG"  # iCloud liefert in aller Regel JPEG
 
 
-_PHOTO_SIZE_WARN_BYTES = 150 * 1024  # iCloud hat groessere Fotos schon mit HTTP 403 abgelehnt
-
-
 def normalize_photo_type(vcard_text):
     """Korrigiert ein falsch deklariertes PHOTO-TYPE (z.B. TYPE=JPEG bei
-    tatsaechlichen PNG-Bytes) anhand der echten Magic-Bytes - iCloud hat so
-    eine Karte schon mit HTTP 403 abgelehnt. Warnt zusaetzlich bei sehr
-    grossen Fotos, die (auch mit korrektem Typ) an einem iCloud-Limit
-    scheitern koennen; eine automatische Verkleinerung braeuchte eine
-    Bildbibliothek (Pillow) und ist bewusst nicht eingebaut, damit das
-    Skript ohne kompilierte Abhaengigkeiten lauffaehig bleibt (z.B. a-Shell).
-    Gibt (vcard_text, warnungen) zurueck."""
+    tatsaechlichen PNG-Bytes) anhand der echten Magic-Bytes - iCloud hatte so
+    eine Karte mit HTTP 403 abgelehnt. Gibt die (ggf. korrigierte) vCard zurueck.
+
+    Eine reine Groessen-Warnung gibt es bewusst nicht mehr: Fotos mit ~150-200 KB
+    wurden problemlos importiert, und der einzige echte 403 lag am falschen Typ
+    (nicht an der Groesse). Scheitert ein Foto doch, meldet der Import das ohnehin
+    praezise als 'FEHLER ... 403' beim betroffenen Kontakt."""
     lines = unfold_vcard(vcard_text)
-    warnings = []
     for i, l in enumerate(lines):
         if not l.upper().startswith("PHOTO"):
             continue
@@ -370,9 +366,7 @@ def normalize_photo_type(vcard_text):
         if declared and declared != real_type:
             head = re.sub(r"TYPE=[A-Za-z0-9]+", f"TYPE={real_type}", head, flags=re.IGNORECASE)
             lines[i] = f"{head}:{val}"
-        if len(data) > _PHOTO_SIZE_WARN_BYTES:
-            warnings.append(f"{len(data) / 1024:.0f} KB")
-    return "\r\n".join(fold_line(x) for x in lines), warnings
+    return "\r\n".join(fold_line(x) for x in lines)
 
 
 def embed_photos(session, vcard_text):
@@ -1099,9 +1093,7 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
         return m.group(1).strip() if m else ""
 
     for i, vcard in enumerate(vcards, 1):
-        vcard, photo_warnings = normalize_photo_type(vcard)
-        for w in photo_warnings:
-            emit(i, f"[{i}] Hinweis: Foto ist {w} groß - iCloud hat solche Fotos schon mit HTTP 403 abgelehnt")
+        vcard = normalize_photo_type(vcard)
 
         uid = extract_uid(vcard)
         if not uid:
