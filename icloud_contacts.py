@@ -567,6 +567,21 @@ def _field_label(segs, item, item_labels, type_map, ignore):
     return "Sonstige"
 
 
+def _dedupe_zip(text):
+    """Entfernt mehrfach auftauchende, identische 5-stellige PLZ-Token (behält
+    das erste). Räumt Altlasten auf, bei denen die PLZ in Straße UND PLZ-Feld
+    steckte und sich sonst bei jedem Export/Import-Rundlauf verdoppelt hätte."""
+    seen = set()
+    out = []
+    for tok in text.split():
+        if re.fullmatch(r"\d{5}", tok):
+            if tok in seen:
+                continue
+            seen.add(tok)
+        out.append(tok)
+    return " ".join(out)
+
+
 def vcard_to_fields(card_lines):
     """Wandelt eine (bereits entfaltete) vCard in ein Feld-Dict fürs Excel um."""
     item_labels = {}
@@ -619,9 +634,13 @@ def vcard_to_fields(card_lines):
         elif base == "ADR":
             label = _field_label(segs, item, item_labels, _ADR_LABELS, {"PREF"})
             p = (val.split(";") + [""] * 7)[:7]
-            street = (p[5] + " " + p[3]).strip()
-            flat = " ".join(x for x in [p[2], street, p[4], p[6]] if x.strip())
+            # Kanonische Reihenfolge: Straße, PLZ, Ort, Region, Land.
+            pieces = [p[2].strip(), p[5].strip(), p[3].strip(), p[4].strip(), p[6].strip()]
+            flat = " ".join(x for x in pieces if x)
             flat = flat.replace("\\n", " ").replace("\\,", ",")
+            # Doppelte PLZ-Token entfernen (Altlast aus früheren, nicht sauber
+            # getrennten Importen - sonst wächst die Adresse bei jedem Rundlauf).
+            flat = _dedupe_zip(flat)
             d["ADR"].append(f"{label}: {flat}")
         elif base == "PHOTO" and not val.lower().startswith(("http://", "https://")):
             d["PHOTO_B64"] = val
@@ -812,6 +831,8 @@ def _split_address(flat_value):
         plz = m.group(1)
         street = text[:m.start()].strip(" ,")
         city = text[m.end():].strip(" ,")
+        # Reste einer verdoppelten PLZ (Altlast) aus dem Ort entfernen.
+        city = " ".join(t for t in city.split() if t != plz and not re.fullmatch(r"\d{5}", t))
     else:
         plz, street, city = "", text, ""
     return street, city, plz, country
