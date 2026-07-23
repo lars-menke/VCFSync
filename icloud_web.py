@@ -251,84 +251,390 @@ PAGE = """
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>iCloud Kontakte Sync</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+
+    --color-primary: #2563eb;
+    --color-primary-hover: #1d4ed8;
+    --color-primary-soft: #eff6ff;
+    --color-accent: #ea580c;
+    --color-accent-hover: #c2410c;
+    --color-accent-soft: #fff7ed;
+    --color-success: #16a34a;
+    --color-success-soft: #f0fdf4;
+    --color-danger: #dc2626;
+    --color-danger-soft: #fef2f2;
+    --color-warning: #d97706;
+    --color-warning-soft: #fffbeb;
+
+    --color-bg: #f8fafc;
+    --color-surface: #ffffff;
+    --color-surface-2: #f1f5f9;
+    --color-border: #e2e8f0;
+    --color-text: #0f172a;
+    --color-text-muted: #64748b;
+    --color-on-primary: #ffffff;
+    --color-on-accent: #ffffff;
+
+    --radius: 14px;
+    --radius-sm: 9px;
+    --shadow-card: 0 1px 2px rgba(15,23,42,.04), 0 1px 12px rgba(15,23,42,.05);
+    --shadow-pop: 0 8px 24px rgba(15,23,42,.10);
+    --ease: cubic-bezier(.16,1,.3,1);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-primary: #3b82f6;
+      --color-primary-hover: #60a5fa;
+      --color-primary-soft: rgba(59,130,246,.12);
+      --color-accent: #fb923c;
+      --color-accent-hover: #fdba74;
+      --color-accent-soft: rgba(251,146,60,.12);
+      --color-success: #4ade80;
+      --color-success-soft: rgba(74,222,128,.10);
+      --color-danger: #f87171;
+      --color-danger-soft: rgba(248,113,113,.10);
+      --color-warning: #fbbf24;
+      --color-warning-soft: rgba(251,191,36,.10);
+
+      --color-bg: #0b1220;
+      --color-surface: #131b2c;
+      --color-surface-2: #1a2337;
+      --color-border: #253048;
+      --color-text: #e6ebf5;
+      --color-text-muted: #8b96ac;
+      --color-on-primary: #0b1220;
+      --color-on-accent: #0b1220;
+      --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 1px 16px rgba(0,0,0,.25);
+      --shadow-pop: 0 12px 32px rgba(0,0,0,.4);
+    }
+  }
+
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         margin: 0; padding: 1.5rem; max-width: 760px; margin-inline: auto;
-         line-height: 1.5; }
-  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
-  .sub { color: #888; margin: 0 0 1.5rem; font-size: .9rem; }
-  .card { border: 1px solid rgba(128,128,128,.3); border-radius: 12px;
-          padding: 1.25rem; margin-bottom: 1.25rem; }
-  .card h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
-  button { font: inherit; padding: .6rem 1.1rem; border-radius: 8px;
-           border: none; background: #2563eb; color: #fff; cursor: pointer;
-           margin: .25rem .25rem .25rem 0; }
-  button.secondary { background: rgba(128,128,128,.2); color: inherit; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  input[type=file] { margin: .5rem 0; display: block; }
-  .warn { background: rgba(220,80,20,.12); border: 1px solid rgba(220,80,20,.4);
-          padding: .75rem 1rem; border-radius: 8px; margin-bottom: 1.25rem; }
-  progress { width: 100%; height: 1.1rem; }
-  #status { margin-top: 1rem; }
-  .muted { color: #888; font-size: .85rem; }
-  .hl { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .8rem;
-        background: rgba(128,128,128,.12); padding: .5rem .75rem; border-radius: 8px;
-        max-height: 220px; overflow: auto; white-space: pre-wrap; }
-  .ok { color: #16a34a; } .bad { color: #dc2626; } .big { font-size: 1.6rem; font-weight: 700; }
-  .counts { display: flex; gap: 1.5rem; margin: .5rem 0; }
-  .counts div { text-align: center; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-bg);
+    color: var(--color-text);
+    margin: 0;
+    padding: 2rem 1.25rem 4rem;
+    line-height: 1.55;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 720px; margin-inline: auto; }
+
+  .topbar { display: flex; align-items: center; gap: .9rem; margin-bottom: 1.75rem; }
+  .brand-mark {
+    width: 44px; height: 44px; flex: none; border-radius: 12px;
+    background: linear-gradient(145deg, var(--color-primary), var(--color-accent));
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--shadow-card);
+  }
+  .brand-mark svg { width: 24px; height: 24px; color: #fff; }
+  h1 { font-size: 1.3rem; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  .sub { color: var(--color-text-muted); margin: .15rem 0 0; font-size: .875rem; }
+  .sub strong { color: var(--color-text); font-weight: 600; }
+
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 1.5rem;
+    margin-bottom: 1.25rem;
+    animation: rise .35s var(--ease) both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  .card-head { display: flex; align-items: flex-start; gap: .75rem; margin-bottom: 1.1rem; }
+  .card-icon {
+    width: 34px; height: 34px; flex: none; border-radius: 10px;
+    background: var(--color-primary-soft); color: var(--color-primary);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card-icon svg { width: 18px; height: 18px; }
+  .card h2 { font-size: 1rem; font-weight: 600; margin: .1rem 0 .2rem; }
+  .card .muted.desc { margin: 0; }
+
+  .muted { color: var(--color-text-muted); font-size: .85rem; }
+  code {
+    font-family: var(--font-mono); font-size: .82em;
+    background: var(--color-surface-2); padding: .1em .4em; border-radius: 5px;
+  }
+
+  .banner {
+    display: flex; gap: .75rem; align-items: flex-start;
+    background: var(--color-warning-soft); border: 1px solid var(--color-warning);
+    color: var(--color-text); padding: 1rem 1.1rem; border-radius: var(--radius-sm);
+    margin-bottom: 1.25rem; font-size: .875rem;
+  }
+  .banner svg { width: 20px; height: 20px; flex: none; color: var(--color-warning); margin-top: .05rem; }
+
+  .btn {
+    font: inherit; font-weight: 600; font-size: .875rem;
+    display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+    min-height: 42px; padding: 0 1.1rem; border-radius: var(--radius-sm);
+    border: 1px solid transparent; cursor: pointer; text-decoration: none;
+    transition: transform .12s var(--ease), background-color .15s var(--ease),
+                border-color .15s var(--ease), box-shadow .15s var(--ease), opacity .15s var(--ease);
+    margin: .2rem .4rem .2rem 0; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  .btn svg { width: 17px; height: 17px; flex: none; }
+  .btn:active { transform: scale(.97); }
+  .btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+  .btn-primary { background: var(--color-primary); color: var(--color-on-primary); }
+  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); box-shadow: 0 4px 14px rgba(37,99,235,.25); }
+
+  .btn-accent { background: var(--color-accent); color: var(--color-on-accent); }
+  .btn-accent:hover:not(:disabled) { background: var(--color-accent-hover); box-shadow: 0 4px 14px rgba(234,88,12,.25); }
+
+  .btn-secondary { background: var(--color-surface-2); color: var(--color-text); border-color: var(--color-border); }
+  .btn-secondary:hover:not(:disabled) { background: var(--color-border); }
+
+  .download-row, .button-row { margin-top: .9rem; }
+  .hidden { display: none !important; }
+
+  .upload-row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: .6rem; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+  .file-label {
+    display: inline-flex; align-items: center; gap: .5rem; min-height: 42px; padding: 0 1.1rem;
+    border-radius: var(--radius-sm); border: 1px dashed var(--color-border);
+    background: var(--color-surface-2); color: var(--color-text); cursor: pointer;
+    font-size: .875rem; font-weight: 600; transition: border-color .15s var(--ease), background-color .15s var(--ease);
+  }
+  .file-label:hover { border-color: var(--color-primary); background: var(--color-primary-soft); }
+  .file-label svg { width: 17px; height: 17px; }
+  .file-label:has(+ input:focus-visible) { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  #fileName { font-size: .85rem; color: var(--color-text-muted); }
+
+  #uploadInfo:not(:empty) { margin: .6rem 0 0; font-size: .85rem; }
+
+  progress { width: 100%; height: 10px; border: none; border-radius: 999px; overflow: hidden;
+             margin-top: .75rem; -webkit-appearance: none; appearance: none; }
+  progress::-webkit-progress-bar { background: var(--color-surface-2); border-radius: 999px; }
+  progress::-webkit-progress-value { background: var(--color-primary); border-radius: 999px; transition: width .3s var(--ease); }
+  progress::-moz-progress-bar { background: var(--color-primary); border-radius: 999px; }
+  progress.indeterminate { background: var(--color-surface-2); position: relative; }
+  progress.indeterminate::-webkit-progress-value { background: var(--color-primary); }
+  .progress-track { position: relative; }
+  .progress-track.indeterminate progress { opacity: 0; }
+  .progress-track.indeterminate::after {
+    content: ""; position: absolute; left: 0; top: .75rem; height: 10px; width: 40%;
+    border-radius: 999px; background: var(--color-primary);
+    animation: indeterminate 1.1s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% { transform: translateX(-100%); } 100% { transform: translateX(250%); }
+  }
+
+  .spinner {
+    width: 15px; height: 15px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.4); border-top-color: currentColor;
+    animation: spin .7s linear infinite; flex: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #status { margin-top: 1.25rem; }
+  #status .card { margin-bottom: 0; }
+
+  .status-head { display: flex; align-items: center; gap: .6rem; margin-bottom: .15rem; }
+  .status-head svg { width: 19px; height: 19px; flex: none; }
+  .status-title { font-weight: 700; font-size: .95rem; }
+  .ok { color: var(--color-success); } .bad { color: var(--color-danger); } .warn-text { color: var(--color-warning); }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; margin: 1rem 0; }
+  .stat-tile {
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm); padding: .75rem .5rem; text-align: center;
+  }
+  .stat-tile.stat-bad { background: var(--color-danger-soft); border-color: var(--color-danger); }
+  .stat-value { font-size: 1.5rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-label { font-size: .72rem; color: var(--color-text-muted); margin-top: .25rem;
+                text-transform: uppercase; letter-spacing: .04em; }
+
+  .callout { display: flex; gap: .6rem; align-items: flex-start; padding: .75rem .9rem;
+             border-radius: var(--radius-sm); font-size: .85rem; margin: .75rem 0; }
+  .callout svg { width: 18px; height: 18px; flex: none; margin-top: .05rem; }
+  .callout-danger { background: var(--color-danger-soft); color: var(--color-danger); }
+  .callout-info { background: var(--color-primary-soft); color: var(--color-primary); }
+
+  .hl {
+    font-family: var(--font-mono); font-size: .78rem; line-height: 1.65;
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    padding: .7rem .85rem; border-radius: var(--radius-sm);
+    max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .hl .l-err { color: var(--color-danger); }
+  .hl .l-warn { color: var(--color-warning); }
+  .hl .l-new { color: var(--color-primary); }
+  .hl-title { margin: .9rem 0 .35rem; font-size: .8rem; font-weight: 600; color: var(--color-text-muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+  @media (max-width: 480px) {
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    body { padding: 1.5rem 1rem 3rem; }
+  }
 </style>
 </head>
 <body>
-  <h1>iCloud Kontakte Sync</h1>
-  <p class="sub">Angemeldet als <strong>{{ user or "—" }}</strong></p>
+<div class="page">
+
+  <div class="topbar">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 4v5h5M20 20v-5h-5"/>
+        <path d="M20 9a8 8 0 0 0-14.93-3M4 15a8 8 0 0 0 14.93 3"/>
+      </svg>
+    </div>
+    <div>
+      <h1>iCloud Kontakte Sync</h1>
+      <p class="sub">Angemeldet als <strong>{{ user or "—" }}</strong></p>
+    </div>
+  </div>
 
   {% if not creds_ok %}
-  <div class="warn">
-    <strong>Zugangsdaten fehlen.</strong> Bitte <code>ICLOUD_USER</code> und
-    <code>ICLOUD_PASS</code> in der <code>.env</code>-Datei setzen und die Seite neu laden.
+  <div class="banner">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/>
+    </svg>
+    <div><strong>Zugangsdaten fehlen.</strong> Bitte <code>ICLOUD_USER</code> und
+    <code>ICLOUD_PASS</code> in der <code>.env</code>-Datei setzen und die Seite neu laden.</div>
   </div>
   {% endif %}
 
   <div class="card">
-    <h2>1 · Export</h2>
-    <p class="muted">Holt alle Kontakte inkl. Fotos aus iCloud.</p>
-    <button id="btnExport" onclick="startExport()">Kontakte aus iCloud exportieren</button>
-    <div id="exportDone" style="display:none">
-      <a href="/api/download/vcf"><button class="secondary">VCF herunterladen</button></a>
-      <a href="/api/download/xlsx"><button class="secondary">Als Excel herunterladen</button></a>
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12m0 0-4-4m4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </div>
+      <div>
+        <h2>1 · Export</h2>
+        <p class="muted desc">Holt alle Kontakte inkl. Fotos aus iCloud.</p>
+      </div>
+    </div>
+    <button id="btnExport" class="btn btn-primary" onclick="startExport()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 4v5h5M20 20v-5h-5"/><path d="M20 9a8 8 0 0 0-14.93-3M4 15a8 8 0 0 0 14.93 3"/>
+      </svg>
+      Kontakte aus iCloud exportieren
+    </button>
+    <div id="exportDone" class="download-row hidden">
+      <a href="/api/download/vcf" class="btn btn-secondary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12m0 0-4-4m4 4 4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+        VCF herunterladen
+      </a>
+      <a href="/api/download/xlsx" class="btn btn-secondary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M3 14h18M9 4v16M15 4v16"/>
+        </svg>
+        Als Excel herunterladen
+      </a>
     </div>
   </div>
 
   <div class="card">
-    <h2>2 · Import</h2>
-    <p class="muted">Bearbeitete Datei hochladen (VCF oder die Excel-Liste),
-       erst einen Testlauf machen, dann wirklich importieren.</p>
-    <input type="file" id="fileInput" accept=".vcf,.xlsx">
-    <button onclick="upload()">Datei hochladen</button>
-    <div id="uploadInfo" class="muted"></div>
-    <div id="importButtons" style="display:none; margin-top:.75rem">
-      <button onclick="startImport(true)">Testlauf (nichts wird geschrieben)</button>
-      <button id="btnReal" onclick="startImport(false)" disabled>Wirklich importieren</button>
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 21V9m0 0-4 4m4-4 4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </div>
+      <div>
+        <h2>2 · Import</h2>
+        <p class="muted desc">Bearbeitete Datei hochladen (VCF oder die Excel-Liste),
+           erst einen Testlauf machen, dann wirklich importieren.</p>
+      </div>
+    </div>
+
+    <div class="upload-row">
+      <label class="file-label" for="fileInput">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 21V9m0 0-4 4m4-4 4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+        Datei auswählen
+      </label>
+      <input type="file" id="fileInput" accept=".vcf,.xlsx" onchange="onFileChosen()">
+      <span id="fileName" class="muted">Keine Datei ausgewählt</span>
+    </div>
+    <button class="btn btn-secondary" onclick="upload()">Hochladen</button>
+    <p id="uploadInfo" class="muted"></p>
+
+    <div id="importButtons" class="button-row hidden">
+      <button class="btn btn-secondary" onclick="startImport(true)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+        </svg>
+        Testlauf (nichts wird geschrieben)
+      </button>
+      <button id="btnReal" class="btn btn-accent" onclick="startImport(false)" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 21V9m0 0-4 4m4-4 4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+        Wirklich importieren
+      </button>
     </div>
   </div>
 
-  <div id="status"></div>
+  <div id="status" aria-live="polite"></div>
+
+</div>
 
 <script>
 let polling = null;
 
+const ICONS = {
+  ok: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>',
+  bad: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>',
+  spin: '<span class="spinner"></span>'
+};
+
+function esc(s){
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function highlightLog(text){
+  return text.split('\\n').map(line => {
+    let cls = '';
+    if (/FEHLER/.test(line)) cls = 'l-err';
+    else if (/GEL(Ö|OE)SCHT|W(Ü|UE)RDE L(Ö|OE)SCHEN/.test(line)) cls = 'l-warn';
+    else if (/NEU ANGELEGT|NEU ANLEGEN/.test(line)) cls = 'l-new';
+    const safe = esc(line);
+    return cls ? '<span class="'+cls+'">'+safe+'</span>' : safe;
+  }).join('\\n');
+}
+
+function onFileChosen(){
+  const f = document.getElementById('fileInput').files[0];
+  document.getElementById('fileName').textContent = f ? f.name : 'Keine Datei ausgewählt';
+}
+
 function setBusy(b){
-  document.querySelectorAll('button').forEach(x => {
+  document.querySelectorAll('.btn').forEach(x => {
     if (x.id !== 'btnReal') x.disabled = b;
   });
 }
 
 async function startExport(){
-  document.getElementById('exportDone').style.display = 'none';
+  document.getElementById('exportDone').classList.add('hidden');
   const r = await fetch('/api/export', {method:'POST'});
   if(r.ok){ setBusy(true); poll(); }
 }
@@ -337,12 +643,12 @@ async function upload(){
   const f = document.getElementById('fileInput').files[0];
   if(!f){ alert('Bitte erst eine Datei auswählen.'); return; }
   const fd = new FormData(); fd.append('file', f);
-  document.getElementById('uploadInfo').textContent = 'Lade hoch ...';
+  document.getElementById('uploadInfo').textContent = 'Lade hoch …';
   const r = await fetch('/api/upload', {method:'POST', body: fd});
   const j = await r.json();
-  if(!r.ok){ document.getElementById('uploadInfo').textContent = 'Fehler: ' + j.error; return; }
+  if(!r.ok){ document.getElementById('uploadInfo').innerHTML = '<span class="bad">Fehler: '+esc(j.error)+'</span>'; return; }
   document.getElementById('uploadInfo').textContent = j.count + ' Kontakte in der Datei gefunden.';
-  document.getElementById('importButtons').style.display = 'block';
+  document.getElementById('importButtons').classList.remove('hidden');
   document.getElementById('btnReal').disabled = true;
 }
 
@@ -363,47 +669,57 @@ async function refresh(){
   const j = await r.json();
   const s = document.getElementById('status');
   let pct = j.total ? Math.round(j.done/j.total*100) : 0;
+  let indeterminate = !j.total;
+
   if(j.running){
-    s.innerHTML = '<div class="card"><strong>' +
-      (j.kind === 'export' ? 'Export läuft …' : 'Import läuft …') + '</strong>' +
-      '<p class="muted">'+ (j.message||'') +'</p>' +
-      '<progress max="100" value="'+pct+'"></progress></div>';
+    s.innerHTML = '<div class="card">' +
+      '<div class="status-head">' + ICONS.spin +
+      '<span class="status-title">'+ (j.kind === 'export' ? 'Export läuft …' : 'Import läuft …') +'</span></div>' +
+      '<p class="muted">'+ esc(j.message||'') +'</p>' +
+      '<div class="progress-track'+(indeterminate?' indeterminate':'')+'">' +
+      '<progress max="100" value="'+pct+'"></progress></div></div>';
     return;
   }
   clearInterval(polling); polling = null; setBusy(false);
+
   if(j.error){
-    s.innerHTML = '<div class="card"><strong class="bad">Fehler:</strong> '+ j.error +'</div>';
+    s.innerHTML = '<div class="card"><div class="status-head bad">'+ ICONS.bad +
+      '<span class="status-title">Fehler</span></div><p>'+ esc(j.error) +'</p></div>';
     return;
   }
   if(!j.result){ s.innerHTML=''; return; }
+
   if(j.kind === 'export'){
-    document.getElementById('exportDone').style.display = 'block';
+    document.getElementById('exportDone').classList.remove('hidden');
     let w = j.result.warnings && j.result.warnings.length
-      ? '<div class="hl">'+ j.result.warnings.join('\\n') +'</div>' : '';
-    s.innerHTML = '<div class="card"><strong class="ok">Export fertig.</strong>' +
-      '<p>'+ j.result.loaded +' Kontakte geladen, '+ j.result.photos +' Fotos eingebettet.</p>' +
-      'Jetzt oben herunterladen.'+ w +'</div>';
+      ? '<p class="hl-title">Warnungen</p><div class="hl">'+ highlightLog(j.result.warnings.join('\\n')) +'</div>' : '';
+    s.innerHTML = '<div class="card"><div class="status-head ok">'+ ICONS.ok +
+      '<span class="status-title">Export fertig</span></div>' +
+      '<p class="muted" style="margin:.35rem 0 0">'+ j.result.loaded +' Kontakte geladen, '+ j.result.photos +
+      ' Fotos eingebettet. Jetzt oben herunterladen.</p>'+ w +'</div>';
   } else {
     const res = j.result;
     document.getElementById('btnReal').disabled = res.dry_run ? false : true;
     let hl = res.highlights && res.highlights.length
-      ? '<div class="hl">'+ res.highlights.join('\\n') +'</div>' : '';
+      ? '<p class="hl-title">Details</p><div class="hl">'+ highlightLog(res.highlights.join('\\n')) +'</div>' : '';
     let changeList = (res.changes && res.changes.length)
-      ? '<p class="muted" style="margin:.75rem 0 .25rem">Geänderte Kontakte:</p>' +
-        '<div class="hl">'+ res.changes.join('\\n') +'</div>' : '';
-    let head = res.dry_run
-      ? '<strong>Testlauf-Ergebnis (nichts geschrieben):</strong>'
-      : '<strong class="ok">Import abgeschlossen.</strong>';
+      ? '<p class="hl-title">Geänderte Kontakte</p><div class="hl">'+ esc(res.changes.join('\\n')) +'</div>' : '';
+    let icon = res.dry_run ? ICONS.warn : ICONS.ok;
+    let head = res.dry_run ? 'Testlauf-Ergebnis (nichts geschrieben)' : 'Import abgeschlossen';
     let delWarn = (res.dry_run && res.deleted)
-      ? '<p class="bad">Achtung: '+res.deleted+' Kontakt(e) würden gelöscht (siehe unten).</p>' : '';
+      ? '<div class="callout callout-danger">'+ ICONS.warn +
+        '<div>Achtung: '+res.deleted+' Kontakt(e) würden gelöscht (siehe unten).</div></div>' : '';
     let hint = res.dry_run
-      ? '<p class="muted">Sieht das gut aus? Dann auf „Wirklich importieren“.</p>' : '';
-    s.innerHTML = '<div class="card">'+ head +
-      '<div class="counts">' +
-      '<div><div class="big">'+res.changed+'</div>geändert</div>' +
-      '<div><div class="big">'+res.created+'</div>neu</div>' +
-      '<div><div class="big '+(res.deleted?'bad':'')+'">'+res.deleted+'</div>gelöscht</div>' +
-      '<div><div class="big '+(res.errors?'bad':'')+'">'+res.errors+'</div>Fehler</div>' +
+      ? '<div class="callout callout-info">'+ ICONS.ok +
+        '<div>Sieht das gut aus? Dann auf „Wirklich importieren“ klicken.</div></div>' : '';
+    s.innerHTML = '<div class="card">' +
+      '<div class="status-head '+(res.dry_run?'warn-text':'ok')+'">'+ icon +
+      '<span class="status-title">'+ head +'</span></div>' +
+      '<div class="stat-grid">' +
+      '<div class="stat-tile"><div class="stat-value">'+res.changed+'</div><div class="stat-label">Geändert</div></div>' +
+      '<div class="stat-tile"><div class="stat-value">'+res.created+'</div><div class="stat-label">Neu</div></div>' +
+      '<div class="stat-tile'+(res.deleted?' stat-bad':'')+'"><div class="stat-value">'+res.deleted+'</div><div class="stat-label">Gelöscht</div></div>' +
+      '<div class="stat-tile'+(res.errors?' stat-bad':'')+'"><div class="stat-value">'+res.errors+'</div><div class="stat-label">Fehler</div></div>' +
       '</div>' +
       '<p class="muted">'+res.updated+' vorhandene Kontakte geprüft, davon '+res.changed+
       ' inhaltlich geändert.</p>' +
