@@ -785,13 +785,45 @@ def _email_property(label, value, next_item):
     return [f"{item}.EMAIL;type=INTERNET:{value}", f"{item}.X-ABLabel:{ablabel}"], next_item + 1
 
 
+# Länder, die im Adress-Freitext am Ende stehen können und abgetrennt werden.
+_COUNTRIES = [
+    "Deutschland", "Germany", "Österreich", "Oesterreich", "Austria",
+    "Schweiz", "Switzerland", "Niederlande", "Netherlands", "Frankreich",
+    "France", "Belgien", "Belgium", "Luxemburg", "Luxembourg", "Dänemark",
+    "Denmark", "Polen", "Poland", "Italien", "Italy", "Spanien", "Spain",
+]
+
+
+def _split_address(flat_value):
+    """Zerlegt einen Adress-Freitext in (Straße, Ort, PLZ, Land).
+    Erwartetes deutsches Format: 'Straße Hausnr PLZ Ort [Land]'. Die 5-stellige
+    PLZ (ersatzweise 4-stellig für AT/CH) trennt Straße von Ort; ein bekanntes
+    Land am Ende wird abgeschnitten. Ohne erkennbare PLZ bleibt alles Straße."""
+    text = re.sub(r"\s+", " ", (flat_value or "").strip()).strip(" ,")
+    country = ""
+    for c in _COUNTRIES:
+        if text.lower().endswith(c.lower()):
+            country = c
+            text = text[:-len(c)].strip(" ,")
+            break
+
+    m = re.search(r"\b(\d{5})\b", text) or re.search(r"\b(\d{4})\b", text)
+    if m:
+        plz = m.group(1)
+        street = text[:m.start()].strip(" ,")
+        city = text[m.end():].strip(" ,")
+    else:
+        plz, street, city = "", text, ""
+    return street, city, plz, country
+
+
 def _adr_property(label, flat_value, next_item):
-    """Baut aus dem Freitext eine ADR-Property. Straße/Ort lassen sich aus dem
-    Fließtext nicht zuverlässig trennen - der komplette Text landet in der
-    Straßen-Komponente, nur die PLZ wird per Regex herausgezogen."""
-    zip_match = re.search(r"\b(\d{5})\b", flat_value)
-    plz = zip_match.group(1) if zip_match else ""
-    comp = ["", "", _vesc(flat_value), "", "", plz, ""]
+    """Baut aus dem Freitext eine ADR-Property mit sauber getrennten
+    Komponenten (Straße / Ort / PLZ / Land), damit iCloud die Felder korrekt
+    füllt statt alles in die Straße zu schreiben."""
+    street, city, plz, country = _split_address(flat_value)
+    # vCard-ADR: PObox;Zusatz;Straße;Ort;Region;PLZ;Land
+    comp = ["", "", _vesc(street), _vesc(city), "", _vesc(plz), _vesc(country)]
     lab = label.lower()
     if lab in ("privat", "arbeit"):
         typ = "WORK" if lab == "arbeit" else "HOME"
