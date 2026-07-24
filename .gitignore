@@ -3,3 +3,5 @@
 *.xlsx
 web_data/
 __pycache__/
+.google_token.json
+client_secret*.json

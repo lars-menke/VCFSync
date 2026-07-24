@@ -182,6 +182,69 @@ ICLOUD_USER=lars@icloud.com
 ICLOUD_PASS=xxxx-xxxx-xxxx-xxxx
 ```
 
+## Google Contacts Sync (optional)
+
+Dieselbe (bearbeitete) VCF lässt sich zusätzlich zu iCloud auch nach Google
+Contacts schreiben. **iCloud bleibt dabei die Quelle der Wahrheit** — der
+Sync geht nur in eine Richtung (iCloud/Excel → Google), es wird nie aus
+Google gelesen und zurückgespiegelt. Google-Kontakte, die von hier aus
+angelegt wurden, werden über ein eigenes Kennzeichen wiedererkannt (Googles
+`userDefined`-Feld `vcfsync_uid`) — dadurch entstehen bei wiederholtem Sync
+keine Duplikate, genau wie bei iCloud per UID.
+
+### Einmalige Einrichtung (nur du kannst das machen)
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → neues
+   Projekt anlegen
+2. „APIs & Services" → „Library" → **„People API"** suchen → aktivieren
+3. „APIs & Services" → „OAuth consent screen" → Typ **„External"** →
+   App-Name/E-Mail ausfüllen, dich selbst als Testnutzer eintragen
+4. „Credentials" → „Create Credentials" → **„OAuth client ID"** →
+   Anwendungstyp **„Desktop app"** → JSON-Datei herunterladen
+5. Google-Abhängigkeiten installieren:
+   ```bash
+   pip install -r requirements-google.txt
+   ```
+6. Pfad zur heruntergeladenen JSON-Datei in der `.env` eintragen:
+   ```
+   GOOGLE_CLIENT_SECRET=client_secret_1234.json
+   ```
+7. Einmalig anmelden (öffnet einen Link zum Einloggen bei Google):
+   ```bash
+   python icloud_contacts.py google-auth
+   ```
+   Speichert die Anmeldung in `.google_token.json` (lokal, nie committet).
+   Läuft der Token irgendwann ab, reicht ein erneutes `google-auth`.
+
+### Nutzung
+
+**Kommandozeile** — `--target` steuert, wohin importiert wird:
+
+```bash
+python icloud_contacts.py import --input bearbeitet.vcf --target icloud   # Standard
+python icloud_contacts.py import --input bearbeitet.vcf --target google
+python icloud_contacts.py import --input bearbeitet.vcf --target both
+python icloud_contacts.py import --input bearbeitet.vcf --target both --dry-run
+```
+
+**Web-Oberfläche** — im Import-Bereich erscheint nach dem Hochladen eine
+Ziel-Auswahl (iCloud / Google / Beide). Ist Google noch nicht verbunden,
+zeigt die Seite einen Hinweis auf `google-auth` an; die Optionen sind bis
+dahin deaktiviert. Aus Sicherheitsgründen läuft die OAuth-Anmeldung selbst
+**nur über die Kommandozeile** (nicht per Klick im Browser) — die Web-App
+liest lediglich den bereits gespeicherten Token.
+
+### Einschränkungen
+
+- Google People API kennt keine freien `CATEGORIES` wie iCloud — Kategorien
+  werden an die Notiz angehängt statt verloren zu gehen.
+- Adressen werden wie beim Excel-Import bestmöglich in Straße/Ort/PLZ/Land
+  zerlegt (siehe oben).
+- Kein Batch-API, einzelne Requests mit kleiner Pause dazwischen. Bei sehr
+  großen Beständen (mehrere hundert Kontakte) kann das an Googles
+  Schreib-Quota stoßen — in der Google Cloud Console unter „APIs & Services"
+  → „People API" → „Quotas" ggf. ein höheres Limit anfragen.
+
 ## Datenschutzhinweis
 
 - Repository unbedingt **privat** halten
@@ -190,3 +253,6 @@ ICLOUD_PASS=xxxx-xxxx-xxxx-xxxx
 - Exportierte Artifacts enthalten alle Kontaktdaten inkl. Fotos
 - Artifacts werden nach 7 Tagen automatisch gelöscht
 - Die Dateien `.env` und `*.vcf` sind via `.gitignore` vom Commit ausgeschlossen
+- Die Google-OAuth-Client-JSON (`client_secret*.json`) und der gespeicherte
+  Google-Token (`.google_token.json`) sind ebenfalls via `.gitignore`
+  ausgeschlossen — niemals committen
