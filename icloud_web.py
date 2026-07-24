@@ -114,49 +114,65 @@ def _run_export():
         _job_finish(error=str(e))
 
 
-def _run_import(dry_run):
+def _highlights_of(log, names):
+    """Neu-/Lösch-/Fehlerzeilen mit echten Namen anreichern (die interessieren)."""
+    def enrich(line):
+        m = re.search(r":\s*([0-9a-fA-F-]{6,})", line)
+        if m:
+            for uid, name in names.items():
+                if uid.startswith(m.group(1)) or m.group(1) in uid:
+                    return f"{line}  ({name})"
+        return line
+
+    return [enrich(l) for l in log
+            if any(k in l for k in ("NEU ANLEGEN", "NEU ANGELEGT", "LÖSCHEN",
+                                    "GELÖSCHT", "FEHLER", "Hinweis"))]
+
+
+def _run_import(dry_run, sync_target):
     try:
         if not IMPORT_VCF.exists():
             raise RuntimeError("Keine Import-Datei vorhanden. Bitte erst hochladen.")
         vcards = ic.split_vcards(IMPORT_VCF.read_text(encoding="utf-8"))
         names = _uid_name_map(vcards)
+        total_steps = len(vcards) * (2 if sync_target == "both" else 1)
+        base_result = {"dry_run": dry_run, "icloud": None, "google": None}
 
-        session, books, primary = build_session()
-        _job_progress(0, len(vcards), "Lese vorhandene Kontakte aus iCloud (UID-Abgleich) ...")
+        if sync_target in ("icloud", "both"):
+            session, books, primary = build_session()
+            _job_progress(0, total_steps, "Lese vorhandene Kontakte aus iCloud (UID-Abgleich) ...")
 
-        def progress(i, total, message):
-            _job_progress(i, total, f"Verarbeite {i}/{total} ...")
+            def progress_ic(i, total, message):
+                _job_progress(i, total_steps, f"iCloud: {i}/{total} ...")
 
-        result = ic.import_vcards(session, books, primary, vcards,
-                                  dry_run=dry_run, progress=progress)
+            result = ic.import_vcards(session, books, primary, vcards,
+                                      dry_run=dry_run, progress=progress_ic)
+            changes = [f"{c['name']}: {', '.join(c['fields'])}" for c in result["changed_list"]]
+            base_result["icloud"] = {
+                "updated": result["updated"], "created": result["created"],
+                "deleted": result["deleted"], "changed": result["changed"],
+                "changes": changes, "errors": result["errors"],
+                "highlights": _highlights_of(result["log"], names),
+            }
 
-        # "Neu"- und Fehlerzeilen mit echten Namen anreichern (die interessieren)
-        def enrich(line):
-            m = re.search(r":\s*([0-9a-fA-F-]{6,})", line)
-            if m:
-                for uid, name in names.items():
-                    if uid.startswith(m.group(1)) or m.group(1) in uid:
-                        return f"{line}  ({name})"
-            return line
+        if sync_target in ("google", "both"):
+            import google_contacts as gc
+            offset = len(vcards) if sync_target == "both" else 0
+            _job_progress(offset, total_steps, "Verbinde mit Google Contacts ...")
+            service = gc.build_google_service(interactive=False)
 
-        highlights = [enrich(l) for l in result["log"]
-                      if any(k in l for k in ("NEU ANLEGEN", "NEU ANGELEGT", "LÖSCHEN",
-                                              "GELÖSCHT", "FEHLER", "Hinweis"))]
+            def progress_g(i, total, message):
+                _job_progress(offset + i, total_steps, f"Google: {i}/{total} ...")
 
-        # Liste der wirklich geänderten Kontakte (Name + betroffene Felder)
-        changes = [f"{c['name']}: {', '.join(c['fields'])}" for c in result["changed_list"]]
+            gresult = gc.push_contacts_to_google(service, vcards, dry_run=dry_run,
+                                                 progress=progress_g)
+            base_result["google"] = {
+                "updated": gresult["updated"], "created": gresult["created"],
+                "deleted": gresult["deleted"], "errors": gresult["errors"],
+                "highlights": _highlights_of(gresult["log"], names),
+            }
 
-        _job_finish(result={
-            "dry_run": dry_run,
-            "updated": result["updated"],
-            "created": result["created"],
-            "deleted": result["deleted"],
-            "changed": result["changed"],
-            "changes": changes,
-            "errors": result["errors"],
-            "total": result["total"],
-            "highlights": highlights,
-        })
+        _job_finish(result=base_result)
     except Exception as e:  # noqa: BLE001
         _job_finish(error=str(e))
 
@@ -240,9 +256,24 @@ def api_upload():
 @app.route("/api/import", methods=["POST"])
 def api_import():
     dry_run = bool(request.json and request.json.get("dry_run"))
-    if not _start("import", _run_import, dry_run):
+    sync_target = (request.json or {}).get("target", "icloud")
+    if sync_target not in ("icloud", "google", "both"):
+        return jsonify({"error": "Ungültiges Ziel."}), 400
+    if not _start("import", _run_import, dry_run, sync_target):
         return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
     return jsonify({"started": True})
+
+
+@app.route("/api/google/status")
+def api_google_status():
+    """Ob eine gültige Google-Anmeldung vorliegt - für den UI-Hinweis, ob
+    'python icloud_contacts.py google-auth' erst noch nötig ist."""
+    import google_contacts as gc
+    try:
+        creds = gc.get_google_credentials(interactive=False)
+        return jsonify({"connected": bool(creds and creds.valid)})
+    except Exception:  # noqa: BLE001 - fehlende Anmeldung/Pakete zaehlt als "nicht verbunden"
+        return jsonify({"connected": False})
 
 
 PAGE = """
@@ -405,6 +436,17 @@ PAGE = """
 
   .download-row, .button-row { margin-top: .9rem; }
   .hidden { display: none !important; }
+
+  .target-group {
+    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+    padding: .6rem .9rem .6rem 0; margin: 0 0 .5rem;
+  }
+  .target-group legend { padding: 0 .6rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+  .target-option { display: inline-flex; align-items: center; gap: .4rem; font-size: .85rem; cursor: pointer; }
+  .target-option input { accent-color: var(--color-primary); width: 16px; height: 16px; cursor: pointer; }
+  #googleHint { margin: -.2rem 0 .6rem; }
+  #googleHint code { display: inline-block; margin-top: .2rem; }
 
   .upload-row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: .6rem; }
   input[type=file] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
@@ -578,6 +620,22 @@ PAGE = """
     <p id="uploadInfo" class="muted"></p>
 
     <div id="importButtons" class="button-row hidden">
+      <fieldset class="target-group">
+        <legend class="muted">Ziel</legend>
+        <label class="target-option">
+          <input type="radio" name="syncTarget" value="icloud" checked> iCloud
+        </label>
+        <label class="target-option">
+          <input type="radio" name="syncTarget" value="google" id="targetGoogle"> Google
+        </label>
+        <label class="target-option">
+          <input type="radio" name="syncTarget" value="both" id="targetBoth"> Beide
+        </label>
+      </fieldset>
+      <p id="googleHint" class="muted hidden">
+        Google ist noch nicht verbunden. Einmalig im Terminal:
+        <code>python icloud_contacts.py google-auth</code>
+      </p>
       <button class="btn btn-secondary" onclick="startImport(true)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
@@ -652,10 +710,27 @@ async function upload(){
   document.getElementById('btnReal').disabled = true;
 }
 
+function selectedTarget(){
+  const el = document.querySelector('input[name=syncTarget]:checked');
+  return el ? el.value : 'icloud';
+}
+
 async function startImport(dry){
   const r = await fetch('/api/import', {method:'POST', headers:{'Content-Type':'application/json'},
-                        body: JSON.stringify({dry_run: dry})});
+                        body: JSON.stringify({dry_run: dry, target: selectedTarget()})});
   if(r.ok){ setBusy(true); poll(); }
+}
+
+async function checkGoogleStatus(){
+  try {
+    const r = await fetch('/api/google/status');
+    const j = await r.json();
+    if(!j.connected){
+      document.getElementById('targetGoogle').disabled = true;
+      document.getElementById('targetBoth').disabled = true;
+      document.getElementById('googleHint').classList.remove('hidden');
+    }
+  } catch(e){ /* Status ist rein informativ - bei Fehler einfach nichts anzeigen */ }
 }
 
 function poll(){
@@ -699,34 +774,49 @@ async function refresh(){
       ' Fotos eingebettet. Jetzt oben herunterladen.</p>'+ w +'</div>';
   } else {
     const res = j.result;
+    const anyDeleted = (res.icloud && res.icloud.deleted) || (res.google && res.google.deleted);
     document.getElementById('btnReal').disabled = res.dry_run ? false : true;
-    let hl = res.highlights && res.highlights.length
-      ? '<p class="hl-title">Details</p><div class="hl">'+ highlightLog(res.highlights.join('\\n')) +'</div>' : '';
-    let changeList = (res.changes && res.changes.length)
-      ? '<p class="hl-title">Geänderte Kontakte</p><div class="hl">'+ esc(res.changes.join('\\n')) +'</div>' : '';
+
     let icon = res.dry_run ? ICONS.warn : ICONS.ok;
     let head = res.dry_run ? 'Testlauf-Ergebnis (nichts geschrieben)' : 'Import abgeschlossen';
-    let delWarn = (res.dry_run && res.deleted)
+    let delWarn = (res.dry_run && anyDeleted)
       ? '<div class="callout callout-danger">'+ ICONS.warn +
-        '<div>Achtung: '+res.deleted+' Kontakt(e) würden gelöscht (siehe unten).</div></div>' : '';
+        '<div>Achtung: es würden Kontakte gelöscht (siehe unten).</div></div>' : '';
     let hint = res.dry_run
       ? '<div class="callout callout-info">'+ ICONS.ok +
         '<div>Sieht das gut aus? Dann auf „Wirklich importieren“ klicken.</div></div>' : '';
-    s.innerHTML = '<div class="card">' +
+
+    let body = '<div class="card">' +
       '<div class="status-head '+(res.dry_run?'warn-text':'ok')+'">'+ icon +
-      '<span class="status-title">'+ head +'</span></div>' +
-      '<div class="stat-grid">' +
-      '<div class="stat-tile"><div class="stat-value">'+res.changed+'</div><div class="stat-label">Geändert</div></div>' +
-      '<div class="stat-tile"><div class="stat-value">'+res.created+'</div><div class="stat-label">Neu</div></div>' +
-      '<div class="stat-tile'+(res.deleted?' stat-bad':'')+'"><div class="stat-value">'+res.deleted+'</div><div class="stat-label">Gelöscht</div></div>' +
-      '<div class="stat-tile'+(res.errors?' stat-bad':'')+'"><div class="stat-value">'+res.errors+'</div><div class="stat-label">Fehler</div></div>' +
-      '</div>' +
-      '<p class="muted">'+res.updated+' vorhandene Kontakte geprüft, davon '+res.changed+
-      ' inhaltlich geändert.</p>' +
-      delWarn + hint + changeList + hl +'</div>';
+      '<span class="status-title">'+ head +'</span></div>' + delWarn + hint;
+
+    if(res.icloud) body += renderTargetResult('iCloud', res.icloud, true);
+    if(res.google) body += renderTargetResult('Google', res.google, false);
+
+    s.innerHTML = body + '</div>';
   }
 }
 
+function renderTargetResult(label, res, showChanged){
+  let hl = res.highlights && res.highlights.length
+    ? '<p class="hl-title">'+label+' – Details</p><div class="hl">'+ highlightLog(res.highlights.join('\\n')) +'</div>' : '';
+  let changeList = (res.changes && res.changes.length)
+    ? '<p class="hl-title">'+label+' – geänderte Kontakte</p><div class="hl">'+ esc(res.changes.join('\\n')) +'</div>' : '';
+  let firstTile = showChanged
+    ? '<div class="stat-tile"><div class="stat-value">'+res.changed+'</div><div class="stat-label">Geändert</div></div>'
+    : '<div class="stat-tile"><div class="stat-value">'+res.updated+'</div><div class="stat-label">Aktualisiert</div></div>';
+  let summary = showChanged
+    ? res.updated+' vorhandene Kontakte geprüft, davon '+res.changed+' inhaltlich geändert.'
+    : res.updated+' vorhandene Kontakte aktualisiert.';
+  return '<p class="hl-title" style="margin-top:1.1rem">'+label+'</p>' +
+    '<div class="stat-grid">' + firstTile +
+    '<div class="stat-tile"><div class="stat-value">'+res.created+'</div><div class="stat-label">Neu</div></div>' +
+    '<div class="stat-tile'+(res.deleted?' stat-bad':'')+'"><div class="stat-value">'+res.deleted+'</div><div class="stat-label">Gelöscht</div></div>' +
+    '<div class="stat-tile'+(res.errors?' stat-bad':'')+'"><div class="stat-value">'+res.errors+'</div><div class="stat-label">Fehler</div></div>' +
+    '</div><p class="muted">'+summary+'</p>' + changeList + hl;
+}
+
+checkGoogleStatus();
 refresh();
 </script>
 </body>

@@ -1181,17 +1181,34 @@ def cmd_import(args, session, books, primary_url):
     print(f"{len(vcards)} Kontakte in {input_file} gefunden.")
 
     dry_run = getattr(args, "dry_run", False)
-    result = import_vcards(session, books, primary_url, vcards, dry_run=dry_run,
-                           progress=lambda i, total, message: print(f"  {message}"))
+    target = getattr(args, "target", "icloud")
 
-    print(f"\nFertig: {result['updated']} aktualisiert "
-          f"(davon {result['changed']} inhaltlich geändert), "
-          f"{result['created']} neu, {result['deleted']} gelöscht, "
-          f"{result['errors']} Fehler.")
-    if result["changed_list"]:
-        print("\nGeänderte Kontakte:")
-        for c in result["changed_list"]:
-            print(f"  - {c['name']}: {', '.join(c['fields'])}")
+    if target in ("icloud", "both"):
+        result = import_vcards(session, books, primary_url, vcards, dry_run=dry_run,
+                               progress=lambda i, total, message: print(f"  {message}"))
+        print(f"\niCloud: {result['updated']} aktualisiert "
+              f"(davon {result['changed']} inhaltlich geändert), "
+              f"{result['created']} neu, {result['deleted']} gelöscht, "
+              f"{result['errors']} Fehler.")
+        if result["changed_list"]:
+            print("\nGeänderte Kontakte (iCloud):")
+            for c in result["changed_list"]:
+                print(f"  - {c['name']}: {', '.join(c['fields'])}")
+
+    if target in ("google", "both"):
+        import google_contacts as gc  # nur laden, wenn tatsächlich gebraucht
+        print("\nVerbinde mit Google Contacts ...")
+        try:
+            service = gc.build_google_service()
+        except RuntimeError as e:
+            print(f"Google-Verbindungsfehler: {e}")
+            sys.exit(1)
+        gresult = gc.push_contacts_to_google(
+            service, vcards, dry_run=dry_run,
+            progress=lambda i, total, message: print(f"  {message}"))
+        print(f"\nGoogle: {gresult['updated']} aktualisiert, "
+              f"{gresult['created']} neu, {gresult['deleted']} gelöscht, "
+              f"{gresult['errors']} Fehler.")
 
 
 # ---------------------------------------------------------------------------
@@ -1266,11 +1283,16 @@ def main():
     exp.add_argument("--skip-photos", action="store_true",
                      help="Fotos nicht nachladen/einbetten (nur URL-Verweise, schneller)")
 
-    imp = sub.add_parser("import", help="Bearbeitete VCF in iCloud zurückspielen")
+    imp = sub.add_parser("import", help="Bearbeitete VCF in iCloud (und/oder Google) zurückspielen")
     imp.add_argument("--input", required=True,
                      help="Zu importierende VCF-Datei")
     imp.add_argument("--dry-run", action="store_true",
                      help="Nur simulieren, nichts schreiben")
+    imp.add_argument("--target", choices=["icloud", "google", "both"], default="icloud",
+                     help="Ziel des Imports (Standard: icloud). 'google' erfordert vorher "
+                          "'google-auth' und GOOGLE_CLIENT_SECRET in der .env")
+
+    gauth = sub.add_parser("google-auth", help="Einmalige Google-Anmeldung (OAuth) für den Google-Kontakte-Sync")
 
     dele = sub.add_parser("delete", help="Kontakte aus iCloud löschen (per UID oder VCF)")
     dele.add_argument("--input",
@@ -1298,6 +1320,23 @@ def main():
         return
     if args.cmd == "from-excel":
         cmd_from_excel(args)
+        return
+
+    if args.cmd == "google-auth":
+        import google_contacts as gc
+        try:
+            gc.get_google_credentials(interactive=True)
+        except RuntimeError as e:
+            print(f"Google-Anmeldung fehlgeschlagen: {e}")
+            sys.exit(1)
+        print(f"Google-Anmeldung erfolgreich gespeichert ({gc.TOKEN_FILE}).")
+        return
+
+    # Import mit --target google braucht keine iCloud-Anmeldung
+    if args.cmd == "import" and getattr(args, "target", "icloud") == "google":
+        if getattr(args, "dry_run", False):
+            print("DRY-RUN: Es werden keine Daten geschrieben.")
+        cmd_import(args, session=None, books=None, primary_url=None)
         return
 
     # Session aufbauen
