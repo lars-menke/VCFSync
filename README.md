@@ -209,10 +209,15 @@ keine Duplikate, genau wie bei iCloud per UID.
    ```
    GOOGLE_CLIENT_SECRET=client_secret_1234.json
    ```
-7. Einmalig anmelden (öffnet einen Link zum Einloggen bei Google):
+7. Einmalig anmelden:
    ```bash
    python icloud_contacts.py google-auth
    ```
+   Gibt einen Link aus, der im Browser geöffnet und dort bei Google bestätigt
+   werden muss. Danach leitet Google auf eine `localhost`-Adresse um, die im
+   Browser einen Fehler zeigt („Seite nicht erreichbar") — das ist **normal**
+   in Codespaces und kein Problem: einfach die komplette Adresse aus der
+   Adressleiste kopieren und im Terminal einfügen, wenn danach gefragt wird.
    Speichert die Anmeldung in `.google_token.json` (lokal, nie committet).
    Läuft der Token irgendwann ab, reicht ein erneutes `google-auth`.
 
