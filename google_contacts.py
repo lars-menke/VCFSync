@@ -110,6 +110,13 @@ def get_google_credentials(interactive=True):
     # "Verbindung verweigert". Der manuelle Copy-Paste-Weg funktioniert
     # überall (Codespaces, a-Shell, lokal) und braucht keinen laufenden
     # lokalen Webserver.
+    #
+    # oauthlib besteht sonst auf https für die Rückleitungs-URL - für den
+    # Loopback-Sonderfall (http://localhost) ist das laut OAuth-Standard
+    # ausdrücklich erlaubt; run_local_server() setzt dasselbe Flag intern,
+    # das übernehmen wir hier manuell.
+    os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
     flow = Flow.from_client_secrets_file(
         str(_client_secret_path()), scopes=GOOGLE_SCOPES, redirect_uri="http://localhost")
     auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
