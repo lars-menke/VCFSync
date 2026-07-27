@@ -81,7 +81,7 @@ def get_google_credentials(interactive=True):
     try:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google_auth_oauthlib.flow import Flow
     except ImportError as e:
         raise RuntimeError(
             "Google-Abhängigkeiten fehlen. Einmalig installieren:\n"
@@ -104,11 +104,35 @@ def get_google_credentials(interactive=True):
             "Keine gültige Google-Anmeldung vorhanden. Einmalig ausführen:\n"
             "  python icloud_contacts.py google-auth")
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(_client_secret_path()), GOOGLE_SCOPES)
-    creds = flow.run_local_server(
-        port=0, open_browser=False,
-        authorization_prompt_message="Bitte im Browser öffnen und bei Google anmelden:\n{url}",
-        success_message="Anmeldung erfolgreich - dieses Browser-Fenster kann geschlossen werden.")
+    # Bewusst kein run_local_server(): in Cloud-Umgebungen wie GitHub
+    # Codespaces landet Googles Rückleitung auf "localhost" im Browser
+    # des Nutzers, nicht im Container, in dem dieses Skript läuft -
+    # "Verbindung verweigert". Der manuelle Copy-Paste-Weg funktioniert
+    # überall (Codespaces, a-Shell, lokal) und braucht keinen laufenden
+    # lokalen Webserver.
+    flow = Flow.from_client_secrets_file(
+        str(_client_secret_path()), scopes=GOOGLE_SCOPES, redirect_uri="http://localhost")
+    auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+
+    print("1. Diese Adresse im Browser öffnen und bei Google anmelden:\n")
+    print(f"   {auth_url}\n")
+    print("2. Google leitet danach auf eine 'localhost'-Adresse um, die im Browser")
+    print("   einen Fehler zeigt ('Seite nicht erreichbar') - das ist in Codespaces")
+    print("   normal und kein Problem.")
+    print("3. Die komplette Adresse aus der Adressleiste kopieren (beginnt mit")
+    print("   'http://localhost/?state=...') und hier einfügen:\n")
+    redirected_url = input("   > ").strip()
+
+    try:
+        flow.fetch_token(authorization_response=redirected_url)
+    except Exception as e:
+        raise RuntimeError(
+            f"Anmeldung fehlgeschlagen ({e}). War die eingefügte Adresse vollständig "
+            "und aktuell (Codes gelten nur wenige Minuten)? Einfach 'google-auth' "
+            "erneut ausführen."
+        ) from e
+
+    creds = flow.credentials
     TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
