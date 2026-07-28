@@ -24,11 +24,16 @@ gäbe es bei jedem Lauf Duplikate (genau das Problem, das uns beim
 UID-Abgleich mit iCloud selbst lange beschäftigt hat).
 
 Absichtlich einfach gehalten: sequenzielle Einzel-Requests (kein Batch-
-API), kleine Pause zwischen Schreibzugriffen. Bei sehr großen Beständen
-(hunderte Kontakte) kann das an Googles Schreib-Quota stoßen - in dem
-Fall in der Google Cloud Console unter "APIs & Services" -> "People API"
--> "Quotas" ein höheres Limit anfragen, oder den Sync in Teilen laufen
-lassen.
+API), Pause zwischen den Zugriffen. Googles Standard-Quota liegt bei nur
+90 "kritischen" Lese- bzw. Schreibzugriffen pro Minute und Nutzer - bei
+mehreren hundert Kontakten (v.a. beim ersten vollen Sync) wird das leicht
+erreicht. Dagegen zwei Maßnahmen: die Pause zwischen Zugriffen ist so
+bemessen, dass die Quota gar nicht erst ausgeschöpft wird, und ein 429
+("Quota exceeded") wird automatisch mit wachsender Wartezeit wiederholt
+statt den Kontakt sofort als Fehler zu zählen. Reicht das bei sehr großen
+Beständen nicht, in der Google Cloud Console unter "APIs & Services" ->
+"People API" -> "Quotas" ein höheres Limit anfragen, oder den Sync in
+Teilen laufen lassen.
 """
 
 import base64
@@ -52,6 +57,13 @@ UPDATE_FIELDS = PERSON_FIELDS  # dieselben Felder werden geschrieben wie gelesen
 # schon ein echtes (nicht generiertes) Foto hat - separat von UPDATE_FIELDS,
 # da Fotos über updateContactPhoto() statt updateContact() geschrieben werden.
 LIST_PERSON_FIELDS = PERSON_FIELDS + ",photos"
+
+# Googles Standard-Quota: 90 kritische Lese-/Schreibzugriffe pro Minute und
+# Nutzer. Mit dieser Pause zwischen den Zugriffen (60s / 80 statt / 90 als
+# Sicherheitsmarge) wird die Quota im Normalfall gar nicht erst erreicht.
+WRITE_DELAY = 60 / 80
+MAX_RETRIES = 6
+RETRY_BASE_DELAY = 5  # Sekunden, verdoppelt sich bei jedem weiteren Versuch
 
 _GOOGLE_TEL_TYPE = {"mobil": "mobile", "privat": "home", "arbeit": "work"}
 _GOOGLE_EMAIL_TYPE = {"privat": "home", "arbeit": "work"}
@@ -275,6 +287,26 @@ def _extract_vcfsync_uid(person):
     return None
 
 
+def _execute_with_retry(request_factory, max_retries=MAX_RETRIES, base_delay=RETRY_BASE_DELAY):
+    """Führt einen Google-API-Request aus und wiederholt ihn bei 429 (Quota
+    überschritten) oder vorübergehenden 5xx-Fehlern mit wachsender Wartezeit
+    (5s, 10s, 20s, ...). request_factory muss bei jedem Aufruf ein FRISCHES
+    Request-Objekt liefern (google-api-python-client-Requests sind nur einmal
+    ausführbar) - deshalb ein Callable statt eines fertigen Requests."""
+    from googleapiclient.errors import HttpError
+    delay = base_delay
+    for attempt in range(max_retries):
+        try:
+            return request_factory().execute()
+        except HttpError as e:
+            status = e.resp.status if e.resp is not None else None
+            retryable = status == 429 or (status is not None and 500 <= status < 600)
+            if not retryable or attempt == max_retries - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
 def fetch_existing_google_uids(service):
     """Gibt {icloud_uid: person} über alle eigenen Google-Kontakte zurück,
     die schon einmal von hier aus angelegt wurden (haben das userDefined-
@@ -286,10 +318,9 @@ def fetch_existing_google_uids(service):
     uid_map = {}
     page_token = None
     while True:
-        req = service.people().connections().list(
+        resp = _execute_with_retry(lambda pt=page_token: service.people().connections().list(
             resourceName="people/me", pageSize=200,
-            personFields=LIST_PERSON_FIELDS, pageToken=page_token)
-        resp = req.execute()
+            personFields=LIST_PERSON_FIELDS, pageToken=pt))
         for person in resp.get("connections", []):
             uid = _extract_vcfsync_uid(person)
             if uid:
@@ -398,8 +429,8 @@ def _upload_photo(service, resource_name, vcard_text):
     if not b64:
         return
     try:
-        service.people().updateContactPhoto(
-            resourceName=resource_name, body={"photoBytes": b64}).execute()
+        _execute_with_retry(lambda: service.people().updateContactPhoto(
+            resourceName=resource_name, body={"photoBytes": b64}))
     except Exception:
         pass  # Foto ist nice-to-have - soll den restlichen Sync nicht scheitern lassen
 
@@ -441,14 +472,14 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
                 deleted += 1
                 continue
             try:
-                service.people().deleteContact(resourceName=resource_name).execute()
+                _execute_with_retry(lambda: service.people().deleteContact(resourceName=resource_name))
                 emit(i, f"[{i}] GELÖSCHT (Google): {uid[:20]}...")
                 deleted += 1
             except Exception as e:  # noqa: BLE001
                 emit(i, f"[{i}] FEHLER Löschen (Google) {e}: {uid[:20]}")
                 errors += 1
             if not dry_run:
-                time.sleep(0.3)
+                time.sleep(WRITE_DELAY)
             continue
 
         body = vcard_to_google_person(vcard)
@@ -474,9 +505,9 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
             try:
                 if not fields_unchanged:
                     body["etag"] = etag
-                    person = service.people().updateContact(
+                    person = _execute_with_retry(lambda: service.people().updateContact(
                         resourceName=resource_name, updatePersonFields=UPDATE_FIELDS,
-                        body=body).execute()
+                        body=body))
                     resource_name = person.get("resourceName", resource_name)
                 if needs_photo_upload:
                     _upload_photo(service, resource_name, vcard)
@@ -491,7 +522,7 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
                 created += 1
                 continue
             try:
-                person = service.people().createContact(body=body).execute()
+                person = _execute_with_retry(lambda: service.people().createContact(body=body))
                 _upload_photo(service, person["resourceName"], vcard)
                 emit(i, f"[{i}] NEU ANGELEGT (Google): {uid[:20]}...")
                 created += 1
@@ -500,7 +531,7 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
                 errors += 1
 
         if not dry_run:
-            time.sleep(0.3)  # Googles Schreib-Quota ist enger als iCloud
+            time.sleep(WRITE_DELAY)  # unter Googles 90/min-Quota bleiben
 
     return {"updated": updated, "created": created, "deleted": deleted,
             "errors": errors, "unchanged": unchanged, "total": total, "log": log}
