@@ -252,10 +252,28 @@ liest lediglich den bereits gespeicherten Token.
   werden an die Notiz angehängt statt verloren zu gehen.
 - Adressen werden wie beim Excel-Import bestmöglich in Straße/Ort/PLZ/Land
   zerlegt (siehe oben).
-- Kein Batch-API, einzelne Requests mit kleiner Pause dazwischen. Bei sehr
-  großen Beständen (mehrere hundert Kontakte) kann das an Googles
-  Schreib-Quota stoßen — in der Google Cloud Console unter „APIs & Services"
-  → „People API" → „Quotas" ggf. ein höheres Limit anfragen.
+- Kein Batch-API, einzelne Requests mit Pause dazwischen (siehe
+  „Rate-Limiting" unten).
+
+### Rate-Limiting (Googles 90/Minute-Quota)
+
+Googles Standard-Kontingent für die People API liegt bei nur 90 „kritischen"
+Lese- bzw. Schreibzugriffen pro Minute und Nutzer — bei mehreren hundert
+Kontakten (v.a. beim allerersten vollen Sync, bevor die Änderungserkennung
+greift) ist das schnell erreicht. Dagegen zwei Maßnahmen:
+
+- Zwischen den Schreibzugriffen wird automatisch pausiert (Tempo knapp unter
+  der Quota), statt sie so schnell wie möglich abzufeuern.
+- Antwortet Google trotzdem mit „429 Quota exceeded" (oder einem
+  vorübergehenden 5xx-Fehler), wird der Zugriff automatisch mit wachsender
+  Wartezeit wiederholt (5s, 10s, 20s, ... bis zu 6 Versuche), statt den
+  Kontakt sofort als Fehler zu zählen.
+
+Bei sehr großen Beständen kann das trotzdem an die Quota stoßen — in der
+Google Cloud Console unter „APIs & Services" → „People API" → „Quotas" ggf.
+ein höheres Limit anfragen, oder den Sync in mehreren Durchgängen laufen
+lassen (dank Änderungserkennung wiederholt ein erneuter Lauf nur die noch
+fehlenden/fehlgeschlagenen Kontakte).
 
 ### Änderungserkennung (nur wirklich geänderte Kontakte werden geschrieben)
 
