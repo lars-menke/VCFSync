@@ -1066,11 +1066,16 @@ def put_vcard(session, url, vcard_text, etag=None):
 
 def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=None):
     """Kernlogik des Imports (ohne Datei-/Konsolenausgabe), gemeinsam genutzt
-    von CLI und Web-Oberfläche.
+    von CLI und Web-Oberfläche. Vorhandene Kontakte, die inhaltlich identisch
+    zum iCloud-Stand sind (changed_fields() == []), werden nicht per PUT
+    geschrieben, sondern nur als "unchanged" gezählt - erspart bei großen
+    Beständen fast alle Schreibzugriffe, wenn sich nur wenige Kontakte
+    tatsächlich geändert haben.
 
     progress(i, total, message) wird pro Kontakt aufgerufen (optional); message
     ist die fertig formatierte Statuszeile (z.B. "[3] AKTUALISIERT: ...").
-    Gibt ein Dict zurück: updated, created, errors, total, log.
+    Gibt ein Dict zurück: updated, created, deleted, changed, changed_list,
+    unchanged, errors, total, log.
     """
     # Vorhandene UIDs aus ALLEN Adressbüchern laden (nicht nur dem ersten -
     # sonst gelten Kontakte aus einem zweiten Adressbuch fälschlich als neu).
@@ -1078,7 +1083,7 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
     existing_content = {}
     uid_map = fetch_existing_uids(session, books, content_out=existing_content)
 
-    updated = created = deleted = errors = changed = 0
+    updated = created = deleted = errors = changed = unchanged = 0
     changed_list = []
     log = []
     total = len(vcards)
@@ -1126,16 +1131,21 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
             url = uid_map[uid]
             old = existing_content.get(uid)
             fields = changed_fields(old, vcard) if old is not None else None
+
+            if fields == []:
+                # Inhaltlich identisch zum iCloud-Stand - der PUT würde denselben
+                # Inhalt schreiben. Überspringen statt unnötig zu schreiben.
+                emit(i, f"[{i}] UNVERÄNDERT (übersprungen): {uid[:20]}...")
+                unchanged += 1
+                continue
+
             if fields:  # unterscheidet sich wirklich vom iCloud-Stand
                 changed += 1
                 changed_list.append({"name": fn_of(vcard) or uid[:12], "fields": fields})
-            # Kennzeichnung in der Statuszeile: geändert / unverändert / unbekannt
-            if fields:
                 tag = f" [geändert: {', '.join(fields)}]"
-            elif fields == []:
-                tag = " [unverändert]"
             else:
-                tag = ""
+                tag = ""  # alter Stand unbekannt (alte VCF ohne UID-Match o.ä.) - sicherheitshalber schreiben
+
             if dry_run:
                 emit(i, f"[{i}] (dry-run) WÜRDE AKTUALISIEREN{tag}: {uid[:20]}...")
                 updated += 1
@@ -1167,7 +1177,7 @@ def import_vcards(session, books, primary_url, vcards, dry_run=False, progress=N
             time.sleep(0.1)  # sanftes Rate-Limiting
 
     return {"updated": updated, "created": created, "deleted": deleted,
-            "changed": changed, "changed_list": changed_list,
+            "changed": changed, "changed_list": changed_list, "unchanged": unchanged,
             "errors": errors, "total": total, "log": log}
 
 
@@ -1189,6 +1199,7 @@ def cmd_import(args, session, books, primary_url):
         print(f"\niCloud: {result['updated']} aktualisiert "
               f"(davon {result['changed']} inhaltlich geändert), "
               f"{result['created']} neu, {result['deleted']} gelöscht, "
+              f"{result['unchanged']} bereits aktuell (übersprungen), "
               f"{result['errors']} Fehler.")
         if result["changed_list"]:
             print("\nGeänderte Kontakte (iCloud):")
