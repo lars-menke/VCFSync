@@ -151,6 +151,7 @@ def _run_import(dry_run, sync_target):
             base_result["icloud"] = {
                 "updated": result["updated"], "created": result["created"],
                 "deleted": result["deleted"], "changed": result["changed"],
+                "unchanged": result["unchanged"],
                 "changes": changes, "errors": result["errors"],
                 "highlights": _highlights_of(result["log"], names),
             }
@@ -807,7 +808,7 @@ function renderTargetResult(label, res, showChanged){
     ? '<div class="stat-tile"><div class="stat-value">'+res.changed+'</div><div class="stat-label">Geändert</div></div>'
     : '<div class="stat-tile"><div class="stat-value">'+res.updated+'</div><div class="stat-label">Aktualisiert</div></div>';
   let summary = showChanged
-    ? res.updated+' vorhandene Kontakte geprüft, davon '+res.changed+' inhaltlich geändert.'
+    ? res.updated+' aktualisiert (davon '+res.changed+' inhaltlich geändert), '+(res.unchanged||0)+' bereits aktuell (übersprungen).'
     : res.updated+' aktualisiert, '+(res.unchanged||0)+' bereits aktuell (übersprungen).';
   return '<p class="hl-title" style="margin-top:1.1rem">'+label+'</p>' +
     '<div class="stat-grid">' + firstTile +

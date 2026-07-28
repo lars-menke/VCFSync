@@ -174,6 +174,13 @@ python icloud_contacts.py import --input bearbeitet.vcf
 > Mustererkennung herausgezogen, der Rest landet in der Straßen-Komponente.
 > Das reicht für iCloud/iPhone völlig aus.
 
+> Vor dem Import werden die vorhandenen iCloud-Kontakte gelesen und
+> feldweise mit den neuen Daten verglichen — nur Kontakte, die neu sind,
+> gelöscht werden sollen oder sich inhaltlich tatsächlich unterscheiden,
+> lösen einen Schreibzugriff aus. Inhaltlich unveränderte Kontakte werden
+> übersprungen und als „bereits aktuell" gezählt statt unnötig neu
+> geschrieben zu werden.
+
 Zugangsdaten werden beim ersten Start abgefragt und optional in einer
 `.env`-Datei gespeichert, oder als Umgebungsvariablen gesetzt:
 
@@ -252,12 +259,13 @@ liest lediglich den bereits gespeicherten Token.
 
 ### Änderungserkennung (nur wirklich geänderte Kontakte werden geschrieben)
 
-Vor jedem Google-Sync werden die vorhandenen Google-Kontakte gelesen und mit
-den neuen Daten verglichen. Nur Kontakte, die neu sind, gelöscht werden
-sollen oder sich inhaltlich (oder im Foto) tatsächlich unterscheiden, lösen
-einen Schreibzugriff (`createContact`/`updateContact`/`deleteContact`) aus —
-inhaltlich unveränderte Kontakte werden übersprungen und als „unverändert"
-gezählt, nicht als „aktualisiert". Das spart bei großen Beständen fast alle
+Genau wie beim iCloud-Import (siehe oben) werden vor jedem Google-Sync die
+vorhandenen Google-Kontakte gelesen und mit den neuen Daten verglichen. Nur
+Kontakte, die neu sind, gelöscht werden sollen oder sich inhaltlich (oder im
+Foto) tatsächlich unterscheiden, lösen einen Schreibzugriff
+(`createContact`/`updateContact`/`deleteContact`) aus — inhaltlich
+unveränderte Kontakte werden übersprungen und als „unverändert" gezählt,
+nicht als „aktualisiert". Das spart bei großen Beständen fast alle
 Schreibzugriffe, wenn seit dem letzten Sync nur wenige Kontakte geändert
 wurden, und schont Googles Schreib-Quota entsprechend.
 
