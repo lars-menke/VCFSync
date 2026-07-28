@@ -236,7 +236,7 @@ def vcard_to_google_person(vcard_text):
         # statt die Information zu verlieren, wird sie an die Notiz angehängt.
         note = (note + "\n" if note else "") + f"Kategorien: {d['CAT']}"
     if note:
-        body["biographies"] = [{"value": note, "contentType": "TEXT"}]
+        body["biographies"] = [{"value": note, "contentType": "TEXT_PLAIN"}]
 
     if d["BDAY"]:
         bday = _parse_bday(d["BDAY"])
