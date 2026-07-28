@@ -169,6 +169,7 @@ def _run_import(dry_run, sync_target):
             base_result["google"] = {
                 "updated": gresult["updated"], "created": gresult["created"],
                 "deleted": gresult["deleted"], "errors": gresult["errors"],
+                "unchanged": gresult.get("unchanged", 0),
                 "highlights": _highlights_of(gresult["log"], names),
             }
 
@@ -807,7 +808,7 @@ function renderTargetResult(label, res, showChanged){
     : '<div class="stat-tile"><div class="stat-value">'+res.updated+'</div><div class="stat-label">Aktualisiert</div></div>';
   let summary = showChanged
     ? res.updated+' vorhandene Kontakte geprüft, davon '+res.changed+' inhaltlich geändert.'
-    : res.updated+' vorhandene Kontakte aktualisiert.';
+    : res.updated+' aktualisiert, '+(res.unchanged||0)+' bereits aktuell (übersprungen).';
   return '<p class="hl-title" style="margin-top:1.1rem">'+label+'</p>' +
     '<div class="stat-grid">' + firstTile +
     '<div class="stat-tile"><div class="stat-value">'+res.created+'</div><div class="stat-label">Neu</div></div>' +
