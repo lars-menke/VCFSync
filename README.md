@@ -250,6 +250,17 @@ liest lediglich den bereits gespeicherten Token.
   Schreib-Quota stoßen — in der Google Cloud Console unter „APIs & Services"
   → „People API" → „Quotas" ggf. ein höheres Limit anfragen.
 
+### Änderungserkennung (nur wirklich geänderte Kontakte werden geschrieben)
+
+Vor jedem Google-Sync werden die vorhandenen Google-Kontakte gelesen und mit
+den neuen Daten verglichen. Nur Kontakte, die neu sind, gelöscht werden
+sollen oder sich inhaltlich (oder im Foto) tatsächlich unterscheiden, lösen
+einen Schreibzugriff (`createContact`/`updateContact`/`deleteContact`) aus —
+inhaltlich unveränderte Kontakte werden übersprungen und als „unverändert"
+gezählt, nicht als „aktualisiert". Das spart bei großen Beständen fast alle
+Schreibzugriffe, wenn seit dem letzten Sync nur wenige Kontakte geändert
+wurden, und schont Googles Schreib-Quota entsprechend.
+
 ## Datenschutzhinweis
 
 - Repository unbedingt **privat** halten

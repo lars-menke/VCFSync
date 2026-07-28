@@ -48,6 +48,10 @@ UID_FIELD_KEY = "vcfsync_uid"
 PERSON_FIELDS = ("names,nicknames,organizations,biographies,birthdays,"
                  "phoneNumbers,emailAddresses,addresses,urls,userDefined")
 UPDATE_FIELDS = PERSON_FIELDS  # dieselben Felder werden geschrieben wie gelesen
+# Fürs Lesen zusätzlich "photos" mitnehmen, um zu erkennen, ob ein Kontakt
+# schon ein echtes (nicht generiertes) Foto hat - separat von UPDATE_FIELDS,
+# da Fotos über updateContactPhoto() statt updateContact() geschrieben werden.
+LIST_PERSON_FIELDS = PERSON_FIELDS + ",photos"
 
 _GOOGLE_TEL_TYPE = {"mobil": "mobile", "privat": "home", "arbeit": "work"}
 _GOOGLE_EMAIL_TYPE = {"privat": "home", "arbeit": "work"}
@@ -272,25 +276,117 @@ def _extract_vcfsync_uid(person):
 
 
 def fetch_existing_google_uids(service):
-    """Gibt {icloud_uid: (resourceName, etag)} über alle eigenen Google-
-    Kontakte zurück, die schon einmal von hier aus angelegt wurden (haben
-    das userDefined-Feld vcfsync_uid). Kontakte ohne dieses Feld (z.B. von
-    Hand angelegte) werden ignoriert - für die gibt es keinen UID-Bezug."""
+    """Gibt {icloud_uid: person} über alle eigenen Google-Kontakte zurück,
+    die schon einmal von hier aus angelegt wurden (haben das userDefined-
+    Feld vcfsync_uid). Kontakte ohne dieses Feld (z.B. von Hand angelegte)
+    werden ignoriert - für die gibt es keinen UID-Bezug. Der volle
+    Person-Datensatz (nicht nur resourceName/etag) wird behalten, damit
+    push_contacts_to_google() prüfen kann, ob sich inhaltlich überhaupt
+    etwas geändert hat, statt bei jedem Lauf alle Kontakte neu zu schreiben."""
     uid_map = {}
     page_token = None
     while True:
         req = service.people().connections().list(
             resourceName="people/me", pageSize=200,
-            personFields=PERSON_FIELDS, pageToken=page_token)
+            personFields=LIST_PERSON_FIELDS, pageToken=page_token)
         resp = req.execute()
         for person in resp.get("connections", []):
             uid = _extract_vcfsync_uid(person)
             if uid:
-                uid_map[uid] = (person["resourceName"], person.get("etag"))
+                uid_map[uid] = person
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
     return uid_map
+
+
+# ---------------------------------------------------------------------------
+# Änderungserkennung: nur wirklich abweichende Kontakte schreiben
+# ---------------------------------------------------------------------------
+
+def _comparable_from_person(person):
+    """Baut aus einem von Google gelesenen Person-Objekt dieselbe Teilmenge
+    an Feldern, die vcard_to_google_person() beim Schreiben erzeugt (ohne
+    Googles Metadaten wie formattedType/metadata/source). So lässt sich der
+    aktuelle Google-Stand direkt mit dem neuen Body vergleichen."""
+    out = {}
+
+    names = person.get("names")
+    if names:
+        n = names[0]
+        val = {"givenName": n.get("givenName", ""), "familyName": n.get("familyName", ""),
+               "honorificPrefix": n.get("honorificPrefix", ""), "honorificSuffix": n.get("honorificSuffix", "")}
+        if any(val.values()):
+            out["names"] = [val]
+
+    nicknames = person.get("nicknames")
+    if nicknames and nicknames[0].get("value"):
+        out["nicknames"] = [{"value": nicknames[0]["value"]}]
+
+    orgs = person.get("organizations")
+    if orgs:
+        o = orgs[0]
+        org = {"name": o.get("name", ""), "department": o.get("department", "")}
+        if o.get("title"):
+            org["title"] = o["title"]
+        if org["name"] or org["department"] or org.get("title"):
+            out["organizations"] = [org]
+
+    bios = person.get("biographies")
+    if bios and bios[0].get("value"):
+        out["biographies"] = [{"value": bios[0]["value"],
+                               "contentType": bios[0].get("contentType", "TEXT_PLAIN")}]
+
+    for b in person.get("birthdays", []):
+        d = b.get("date")
+        if d:
+            out["birthdays"] = [{"date": {k: d[k] for k in ("year", "month", "day") if k in d}}]
+            break
+
+    if person.get("phoneNumbers"):
+        out["phoneNumbers"] = [{"value": t.get("value", ""), "type": t.get("type", "other")}
+                               for t in person["phoneNumbers"]]
+    if person.get("emailAddresses"):
+        out["emailAddresses"] = [{"value": e.get("value", ""), "type": e.get("type", "other")}
+                                 for e in person["emailAddresses"]]
+    if person.get("urls"):
+        out["urls"] = [{"value": u.get("value", ""), "type": u.get("type", "other")}
+                       for u in person["urls"]]
+    if person.get("addresses"):
+        out_addrs = []
+        for a in person["addresses"]:
+            addr = {"type": a.get("type", "other")}
+            for key in ("streetAddress", "city", "postalCode", "country"):
+                if a.get(key):
+                    addr[key] = a[key]
+            out_addrs.append(addr)
+        out["addresses"] = out_addrs
+
+    out["userDefined"] = [ud for ud in person.get("userDefined", []) if ud.get("key") == UID_FIELD_KEY]
+    return out
+
+
+def _normalize_for_compare(body):
+    """Wandelt einen Person-Body in eine ordnungsunabhängige, vergleichbare
+    Form um (Listen von dicts werden sortiert), damit z.B. eine von Google
+    anders sortierte Telefonliste keine unnötige Aktualisierung auslöst."""
+    def norm(value):
+        if isinstance(value, dict):
+            return tuple(sorted((k, norm(v)) for k, v in value.items()))
+        if isinstance(value, list):
+            return tuple(sorted(norm(v) for v in value))
+        return value
+    return norm({k: v for k, v in body.items() if k != "etag"})
+
+
+def _person_unchanged(new_body, existing_person):
+    return _normalize_for_compare(new_body) == _normalize_for_compare(_comparable_from_person(existing_person))
+
+
+def _has_real_photo(person):
+    """True, wenn Google für den Kontakt schon ein hochgeladenes (nicht
+    automatisch generiertes) Foto hat."""
+    return any(not p.get("default") for p in person.get("photos", []))
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +407,15 @@ def _upload_photo(service, resource_name, vcard_text):
 def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
     """Kernlogik des Google-Syncs, im selben Stil wie import_vcards() für
     iCloud: legt neue Kontakte an, aktualisiert vorhandene (per UID-Abgleich
-    über das userDefined-Feld) und löscht zum Löschen markierte. Gibt ein
-    Dict zurück: updated, created, deleted, errors, total, log."""
+    über das userDefined-Feld) und löscht zum Löschen markierte. Vorhandene
+    Kontakte, die inhaltlich (und im Foto) unverändert sind, werden nicht
+    geschrieben, sondern nur gezählt (unchanged) - erspart bei großen
+    Beständen fast alle Schreibzugriffe, wenn sich nur wenige Kontakte
+    tatsächlich geändert haben. Gibt ein Dict zurück: updated, created,
+    deleted, errors, unchanged, total, log."""
     existing = fetch_existing_google_uids(service)
 
-    updated = created = deleted = errors = 0
+    updated = created = deleted = errors = unchanged = 0
     log = []
     total = len(vcards)
 
@@ -335,7 +435,7 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
             if uid not in existing:
                 emit(i, f"[{i}] LÖSCHEN übersprungen (nicht in Google): {uid[:20]}...")
                 continue
-            resource_name, _etag = existing[uid]
+            resource_name = existing[uid]["resourceName"]
             if dry_run:
                 emit(i, f"[{i}] (dry-run) WÜRDE LÖSCHEN (Google): {uid[:20]}...")
                 deleted += 1
@@ -354,17 +454,32 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
         body = vcard_to_google_person(vcard)
 
         if uid in existing:
-            resource_name, etag = existing[uid]
+            existing_person = existing[uid]
+            resource_name = existing_person["resourceName"]
+            etag = existing_person.get("etag")
+
+            fields_unchanged = _person_unchanged(body, existing_person)
+            photo_b64 = _photo_b64_of(vcard)
+            needs_photo_upload = bool(photo_b64) and not _has_real_photo(existing_person)
+
+            if fields_unchanged and not needs_photo_upload:
+                emit(i, f"[{i}] UNVERÄNDERT (Google, übersprungen): {uid[:20]}...")
+                unchanged += 1
+                continue
+
             if dry_run:
                 emit(i, f"[{i}] (dry-run) WÜRDE AKTUALISIEREN (Google): {uid[:20]}...")
                 updated += 1
                 continue
             try:
-                body["etag"] = etag
-                person = service.people().updateContact(
-                    resourceName=resource_name, updatePersonFields=UPDATE_FIELDS,
-                    body=body).execute()
-                _upload_photo(service, person.get("resourceName", resource_name), vcard)
+                if not fields_unchanged:
+                    body["etag"] = etag
+                    person = service.people().updateContact(
+                        resourceName=resource_name, updatePersonFields=UPDATE_FIELDS,
+                        body=body).execute()
+                    resource_name = person.get("resourceName", resource_name)
+                if needs_photo_upload:
+                    _upload_photo(service, resource_name, vcard)
                 emit(i, f"[{i}] AKTUALISIERT (Google): {uid[:20]}...")
                 updated += 1
             except Exception as e:  # noqa: BLE001
@@ -388,4 +503,4 @@ def push_contacts_to_google(service, vcards, dry_run=False, progress=None):
             time.sleep(0.3)  # Googles Schreib-Quota ist enger als iCloud
 
     return {"updated": updated, "created": created, "deleted": deleted,
-            "errors": errors, "total": total, "log": log}
+            "errors": errors, "unchanged": unchanged, "total": total, "log": log}
