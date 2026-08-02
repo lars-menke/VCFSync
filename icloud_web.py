@@ -29,6 +29,7 @@ from flask import (Flask, Response, jsonify, render_template_string, request,
 from requests.auth import HTTPBasicAuth
 
 import icloud_contacts as ic
+import mail_cleanup as mc
 
 app = Flask(__name__)
 
@@ -278,17 +279,188 @@ def api_google_status():
         return jsonify({"connected": False})
 
 
-PAGE = """
-<!doctype html>
-<html lang="de">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>iCloud Kontakte Sync</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+# ---------------------------------------------------------------------------
+# E-Mail aufräumen
+# ---------------------------------------------------------------------------
+
+MAIL_XLSX = DATA_DIR / "mail_aufraeumen.xlsx"
+
+
+def _mail_error(e):
+    return jsonify({"error": str(e)}), 400
+
+
+def _run_mail_scan(selection, min_age):
+    try:
+        settings = {"min_age_days": min_age} if min_age is not None else None
+        scan = mc.scan_accounts(
+            selection, settings,
+            progress=lambda message: _job_progress(0, 0, message))
+        _job_finish(result={"kind": "scan", **mc.scan_summary(scan)})
+    except Exception as e:  # noqa: BLE001
+        _job_finish(error=str(e))
+
+
+def _run_mail_clean(dry_run):
+    try:
+        scan = mc.load_scan()
+        result = mc.clean(scan, dry_run=dry_run,
+                          progress=lambda message: _job_progress(0, 0, message))
+        _job_finish(result={"kind": "clean", **result})
+    except Exception as e:  # noqa: BLE001
+        _job_finish(error=str(e))
+
+
+@app.route("/mail")
+def mail_index():
+    return render_template_string(MAIL_PAGE)
+
+
+@app.route("/api/mail/accounts", methods=["GET", "POST", "DELETE"])
+def api_mail_accounts():
+    """Konten verwalten. Passwörter werden nie zurückgeliefert."""
+    try:
+        if request.method == "GET":
+            return jsonify({
+                "accounts": [{"name": a["name"], "user": a["user"], "host": a["host"],
+                              "port": a.get("port", 993)} for a in mc.load_accounts()],
+                "presets": mc.PRESETS,
+            })
+        if request.method == "DELETE":
+            name = (request.json or {}).get("name", "")
+            if not name:
+                return jsonify({"error": "Kein Konto angegeben."}), 400
+            mc.remove_account(name)
+            return jsonify({"ok": True})
+
+        data = request.json or {}
+        missing = [f for f in ("name", "host", "user", "password") if not data.get(f)]
+        if missing:
+            return jsonify({"error": f"Es fehlt: {', '.join(missing)}."}), 400
+        mc.add_account(data["name"], data["host"], data["user"], data["password"],
+                       data.get("port", 993))
+        try:
+            info = mc.test_account(mc.account_by_name(data["name"]))
+        except Exception as e:  # noqa: BLE001 - Konto bleibt gespeichert, Fehler nur melden
+            return jsonify({"ok": True, "tested": False, "message": str(e)})
+        return jsonify({"ok": True, "tested": True, "folders": info["folders"],
+                        "trash": info["trash"]})
+    except Exception as e:  # noqa: BLE001
+        return _mail_error(e)
+
+
+@app.route("/api/mail/folders")
+def api_mail_folders():
+    name = request.args.get("account", "")
+    try:
+        return jsonify({"folders": mc.list_account_folders(mc.account_by_name(name))})
+    except Exception as e:  # noqa: BLE001
+        return _mail_error(e)
+
+
+@app.route("/api/mail/scan", methods=["POST"])
+def api_mail_scan():
+    data = request.json or {}
+    selection = data.get("selection") or []
+    if not selection or not any(s.get("folders") for s in selection):
+        return jsonify({"error": "Bitte mindestens einen Ordner auswählen."}), 400
+    min_age = data.get("min_age")
+    if min_age is not None:
+        try:
+            min_age = max(0, int(min_age))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Mindestalter muss eine Zahl sein."}), 400
+    if not _start("mailscan", _run_mail_scan, selection, min_age):
+        return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
+    return jsonify({"started": True})
+
+
+@app.route("/api/mail/result")
+def api_mail_result():
+    """Scan-Ergebnis für die Anzeige: nach Absender gruppiert, damit man
+    ganze Newsletter-Serien auf einen Blick abhaken kann."""
+    try:
+        scan = mc.load_scan()
+    except RuntimeError as e:
+        return _mail_error(e)
+
+    groups = {}
+    for acc, folder, mail in mc.iter_mails(scan):
+        # Nie vorgeschlagene Mails gehören nicht in die Auswahlliste - es sei
+        # denn, sie wurden in der Excel-Liste von Hand angehakt. Sonst wären
+        # sie hier unsichtbar und würden beim nächsten Klick stillschweigend
+        # wieder abgewählt (die Web-Auswahl überschreibt den ganzen Stand).
+        if mail.get("recommendation") == "keep" and not mail.get("delete"):
+            continue
+        sender = mail.get("from") or "(ohne Absender)"
+        group = groups.setdefault(sender, {
+            "sender": sender, "name": mail.get("from_name", ""), "mails": [],
+            "selected": 0, "bytes": 0})
+        group["mails"].append({
+            "key": mc.mail_key(acc["account"], folder["folder"], mail["uid"]),
+            "account": acc["account"], "folder": folder["folder"],
+            "subject": mail.get("subject", ""), "date": (mail.get("date") or "")[:10],
+            "size": mail.get("size", 0), "score": mail.get("score", 0),
+            "recommendation": mail.get("recommendation"),
+            "reasons": mail.get("reasons", []), "delete": bool(mail.get("delete")),
+        })
+        group["selected"] += 1 if mail.get("delete") else 0
+        group["bytes"] += mail.get("size", 0)
+
+    ordered = sorted(groups.values(), key=lambda g: (-len(g["mails"]), g["sender"]))
+    for group in ordered:
+        group["mails"].sort(key=lambda m: m["date"])
+    return jsonify({"groups": ordered, "summary": mc.scan_summary(scan),
+                    "executed": scan.get("executed")})
+
+
+@app.route("/api/mail/select", methods=["POST"])
+def api_mail_select():
+    keys = (request.json or {}).get("keys")
+    if not isinstance(keys, list):
+        return jsonify({"error": "Ungültige Auswahl."}), 400
+    try:
+        return jsonify({"selected": mc.apply_selection(mc.load_scan(), keys)})
+    except Exception as e:  # noqa: BLE001
+        return _mail_error(e)
+
+
+@app.route("/api/mail/download/xlsx")
+def api_mail_download_xlsx():
+    try:
+        mc.scan_to_excel(mc.load_scan(), MAIL_XLSX)
+    except RuntimeError as e:
+        return str(e), 404
+    return send_file(MAIL_XLSX, as_attachment=True, download_name="mail_aufraeumen.xlsx")
+
+
+@app.route("/api/mail/upload", methods=["POST"])
+def api_mail_upload():
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".xlsx"):
+        return jsonify({"error": "Bitte die bearbeitete .xlsx-Datei hochladen."}), 400
+    up = DATA_DIR / "mail_upload.xlsx"
+    f.save(up)
+    try:
+        return jsonify(mc.scan_from_excel(mc.load_scan(), up))
+    except Exception as e:  # noqa: BLE001
+        return _mail_error(e)
+
+
+@app.route("/api/mail/clean", methods=["POST"])
+def api_mail_clean():
+    dry_run = bool((request.json or {}).get("dry_run", True))
+    if not _start("mailclean", _run_mail_clean, dry_run):
+        return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
+    return jsonify({"started": True})
+
+
+@app.route("/api/mail/learned")
+def api_mail_learned():
+    return jsonify({"rows": mc.learned_summary()})
+
+
+BASE_CSS = """
 <style>
   :root {
     color-scheme: light dark;
@@ -532,9 +704,112 @@ PAGE = """
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     body { padding: 1.5rem 1rem 3rem; }
   }
+
+  /* --- Navigation zwischen Kontakten und E-Mail --- */
+  .nav { display: flex; gap: .4rem; margin-left: auto; }
+  .nav a {
+    display: inline-flex; align-items: center; gap: .4rem; text-decoration: none;
+    padding: .45rem .85rem; border-radius: 8px; font-size: .88rem; font-weight: 500;
+    color: var(--color-text-muted); border: 1px solid transparent;
+  }
+  .nav a:hover { background: var(--color-surface-alt); color: var(--color-text); }
+  .nav a.active {
+    background: var(--color-primary-soft); color: var(--color-primary);
+    border-color: var(--color-primary); font-weight: 600;
+  }
+  .nav a svg { width: 16px; height: 16px; }
+
+  /* --- E-Mail: Konten, Ordner, Absendergruppen --- */
+  .acc-row {
+    display: flex; align-items: center; gap: .6rem; padding: .6rem .8rem;
+    border: 1px solid var(--color-border); border-radius: 10px; margin-bottom: .5rem;
+    background: var(--color-surface-alt); flex-wrap: wrap;
+  }
+  .acc-row .acc-name { font-weight: 600; }
+  .acc-row .acc-detail { color: var(--color-text-muted); font-size: .85rem; }
+  .acc-row .acc-actions { margin-left: auto; display: flex; gap: .4rem; }
+  .form-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: .6rem; margin: .8rem 0;
+  }
+  .form-grid label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem;
+    color: var(--color-text-muted); font-weight: 500; }
+  .form-grid input, .form-grid select {
+    padding: .5rem .65rem; border-radius: 8px; font: inherit; font-size: .9rem;
+    border: 1px solid var(--color-border); background: var(--color-surface);
+    color: var(--color-text);
+  }
+  .form-grid input:focus, .form-grid select:focus {
+    outline: 2px solid var(--color-primary); outline-offset: 1px; border-color: transparent;
+  }
+  .folder-list {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: .3rem; margin: .7rem 0; max-height: 15rem; overflow-y: auto;
+    padding: .6rem; border: 1px solid var(--color-border); border-radius: 10px;
+  }
+  .folder-list label { display: flex; align-items: center; gap: .45rem; font-size: .88rem; }
+  .group {
+    border: 1px solid var(--color-border); border-radius: 10px; margin-bottom: .6rem;
+    overflow: hidden;
+  }
+  .group-head {
+    display: flex; align-items: center; gap: .6rem; padding: .6rem .8rem;
+    background: var(--color-surface-alt); cursor: pointer; flex-wrap: wrap;
+  }
+  .group-head .g-sender { font-weight: 600; font-family: var(--font-mono); font-size: .85rem; }
+  .group-head .g-meta { color: var(--color-text-muted); font-size: .82rem; margin-left: auto; }
+  .group-mails { display: none; padding: .3rem .8rem .6rem; }
+  .group.open .group-mails { display: block; }
+  .mail-row {
+    display: flex; align-items: flex-start; gap: .55rem; padding: .4rem 0;
+    border-top: 1px solid var(--color-border); font-size: .87rem;
+  }
+  .mail-row:first-child { border-top: none; }
+  .mail-row .m-body { flex: 1; min-width: 0; }
+  .mail-row .m-subject { display: block; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .mail-row .m-why { color: var(--color-text-muted); font-size: .78rem; }
+  .mail-row .m-date { color: var(--color-text-muted); font-size: .78rem;
+    font-family: var(--font-mono); white-space: nowrap; }
+  .pill {
+    display: inline-block; padding: .05rem .4rem; border-radius: 999px;
+    font-size: .72rem; font-weight: 600;
+  }
+  .pill-delete { background: #fee2e2; color: #b91c1c; }
+  .pill-unsure { background: #fef3c7; color: #92400e; }
+  .pill-keep { background: var(--color-primary-soft); color: var(--color-primary); }
+  @media (prefers-color-scheme: dark) {
+    .pill-delete { background: #7f1d1d; color: #fecaca; }
+    .pill-unsure { background: #78350f; color: #fde68a; }
+  }
+  :root[data-theme="dark"] .pill-delete { background: #7f1d1d; color: #fecaca; }
+  :root[data-theme="dark"] .pill-unsure { background: #78350f; color: #fde68a; }
+  :root[data-theme="light"] .pill-delete { background: #fee2e2; color: #b91c1c; }
+  :root[data-theme="light"] .pill-unsure { background: #fef3c7; color: #92400e; }
 </style>
-</head>
-<body>
+"""
+
+# Kopfbereich einmal definiert und von beiden Seiten (Kontakte, E-Mail) genutzt -
+# so bleibt das Aussehen automatisch einheitlich, wenn am Stil etwas geaendert wird.
+_HEAD_BEFORE_TITLE = """<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>"""
+_HEAD_AFTER_TITLE = """</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+"""
+
+
+def _head(title):
+    return _HEAD_BEFORE_TITLE + title + _HEAD_AFTER_TITLE + BASE_CSS + "\n</head>\n<body>\n"
+
+
+PAGE = _head("iCloud Kontakte Sync") + """
 <div class="page">
 
   <div class="topbar">
@@ -548,6 +823,20 @@ PAGE = """
       <h1>iCloud Kontakte Sync</h1>
       <p class="sub">Angemeldet als <strong>{{ user or "—" }}</strong></p>
     </div>
+    <nav class="nav">
+      <a href="/" class="active">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+        </svg>
+        Kontakte
+      </a>
+      <a href="/mail">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
+        </svg>
+        E-Mail
+      </a>
+    </nav>
   </div>
 
   {% if not creds_ok %}
@@ -826,9 +1115,481 @@ refresh();
 """
 
 
+MAIL_PAGE = _head("E-Mail aufräumen") + """
+<div class="page">
+
+  <div class="topbar">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
+      </svg>
+    </div>
+    <div>
+      <h1>E-Mail aufräumen</h1>
+      <p class="sub">Vorschläge prüfen, dann in den Papierkorb verschieben</p>
+    </div>
+    <nav class="nav">
+      <a href="/">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+        </svg>
+        Kontakte
+      </a>
+      <a href="/mail" class="active">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
+        </svg>
+        E-Mail
+      </a>
+    </nav>
+  </div>
+
+  <div class="callout callout-info">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+    </svg>
+    <div>Nichts wird endgültig gelöscht: Mails wandern in den <strong>Papierkorb</strong>
+    des jeweiligen Kontos und lassen sich dort zurückholen.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
+        </svg>
+      </div>
+      <div>
+        <h2>1 · Postfächer</h2>
+        <p class="muted desc">IMAP-Konten mit app-spezifischem Passwort. Die Zugangsdaten
+           bleiben lokal in <code>mail_accounts.json</code>.</p>
+      </div>
+    </div>
+    <div id="accountList"></div>
+    <button class="btn btn-secondary" onclick="toggleAccountForm()">Konto hinzufügen</button>
+    <div id="accountForm" class="hidden">
+      <div class="form-grid">
+        <label>Anzeigename<input id="accName" placeholder="iCloud"></label>
+        <label>Anbieter
+          <select id="accPreset" onchange="applyPreset()">
+            <option value="">eigener Server</option>
+          </select>
+        </label>
+        <label>IMAP-Server<input id="accHost" placeholder="imap.mail.me.com"></label>
+        <label>Port<input id="accPort" value="993"></label>
+        <label>Benutzername<input id="accUser" placeholder="name@icloud.com"></label>
+        <label>Passwort<input id="accPass" type="password" placeholder="app-spezifisch"></label>
+      </div>
+      <button class="btn btn-primary" onclick="addAccount()">Speichern und testen</button>
+      <p id="accInfo" class="muted"></p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+        </svg>
+      </div>
+      <div>
+        <h2>2 · Durchsuchen</h2>
+        <p class="muted desc">Ordner auswählen und bewerten lassen. Dabei wird
+           ausschließlich gelesen - es wird nichts verändert.</p>
+      </div>
+    </div>
+    <div id="folderArea" class="muted">Erst ein Konto anlegen.</div>
+    <div class="form-grid" style="max-width:240px">
+      <label>Mindestalter in Tagen
+        <input id="minAge" type="number" min="0" value="30">
+      </label>
+    </div>
+    <button id="btnScan" class="btn btn-primary" onclick="startScan()">
+      Ausgewählte Ordner durchsuchen
+    </button>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>
+        </svg>
+      </div>
+      <div>
+        <h2>3 · Prüfen</h2>
+        <p class="muted desc">Vorgeschlagene Mails abhaken - hier im Browser oder
+           bequemer in Excel. Vorangehakt ist nur, was deutlich weg kann.</p>
+      </div>
+    </div>
+    <div class="download-row">
+      <a href="/api/mail/download/xlsx" class="btn btn-secondary">Als Excel herunterladen</a>
+      <label class="file-label" for="mailFile">Bearbeitete Excel hochladen</label>
+      <input type="file" id="mailFile" accept=".xlsx" onchange="uploadExcel()">
+    </div>
+    <p id="uploadInfo" class="muted"></p>
+    <div id="resultArea"><p class="muted">Noch kein Scan vorhanden.</p></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+        </svg>
+      </div>
+      <div>
+        <h2>4 · Aufräumen</h2>
+        <p class="muted desc">Erst der Testlauf, dann wirklich verschieben.</p>
+      </div>
+    </div>
+    <div class="button-row">
+      <button class="btn btn-secondary" onclick="startClean(true)">
+        Testlauf (nichts wird verschoben)
+      </button>
+      <button id="btnRealClean" class="btn btn-accent" onclick="startClean(false)" disabled>
+        Wirklich in den Papierkorb
+      </button>
+    </div>
+  </div>
+
+  <div id="status" aria-live="polite"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/>
+        </svg>
+      </div>
+      <div>
+        <h2>Gelernt</h2>
+        <p class="muted desc">Was das Tool aus deinen bisherigen Entscheidungen
+           mitgenommen hat. Wird nach jedem echten Aufräumen ergänzt.</p>
+      </div>
+    </div>
+    <div id="learnedArea"><p class="muted">Noch nichts gelernt.</p></div>
+  </div>
+
+</div>
+
+<script>
+let polling = null;
+let selected = new Set();
+let presets = {};
+
+const I_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>';
+const I_BAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>';
+const I_WARN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>';
+
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function kb(bytes){
+  if(bytes >= 1048576) return (bytes/1048576).toFixed(1) + ' MB';
+  return Math.round(bytes/1024) + ' KB';
+}
+async function jget(url){
+  const r = await fetch(url);
+  return await r.json();
+}
+async function jpost(url, body, method){
+  const r = await fetch(url, {method: method || 'POST',
+    headers: {'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+  return {ok: r.ok, data: await r.json()};
+}
+
+/* ---------- Konten ---------- */
+async function loadAccounts(){
+  const j = await jget('/api/mail/accounts');
+  presets = j.presets || {};
+  const sel = document.getElementById('accPreset');
+  if(sel.options.length <= 1){
+    Object.keys(presets).forEach(name => {
+      const o = document.createElement('option');
+      o.value = name; o.textContent = name;
+      sel.appendChild(o);
+    });
+  }
+  const list = document.getElementById('accountList');
+  if(!j.accounts.length){
+    list.innerHTML = '<p class="muted">Noch kein Konto eingerichtet.</p>';
+  } else {
+    list.innerHTML = j.accounts.map(a =>
+      '<div class="acc-row"><span class="acc-name">' + esc(a.name) + '</span>' +
+      '<span class="acc-detail">' + esc(a.user) + ' · ' + esc(a.host) + ':' + a.port + '</span>' +
+      '<span class="acc-actions">' +
+      '<button class="btn btn-secondary" onclick="removeAccount(\\'' + esc(a.name) + '\\')">Entfernen</button>' +
+      '</span></div>').join('');
+  }
+  renderFolderArea(j.accounts);
+}
+function toggleAccountForm(){
+  document.getElementById('accountForm').classList.toggle('hidden');
+}
+function applyPreset(){
+  const p = presets[document.getElementById('accPreset').value];
+  if(p){
+    document.getElementById('accHost').value = p.host;
+    document.getElementById('accPort').value = p.port;
+  }
+}
+async function addAccount(){
+  const info = document.getElementById('accInfo');
+  info.textContent = 'Verbinde ...';
+  const res = await jpost('/api/mail/accounts', {
+    name: document.getElementById('accName').value.trim(),
+    host: document.getElementById('accHost').value.trim(),
+    port: document.getElementById('accPort').value.trim() || 993,
+    user: document.getElementById('accUser').value.trim(),
+    password: document.getElementById('accPass').value
+  });
+  if(!res.ok){ info.textContent = 'Fehler: ' + res.data.error; return; }
+  if(res.data.tested){
+    info.textContent = 'Verbunden: ' + res.data.folders + ' Ordner, Papierkorb: ' +
+      (res.data.trash || 'nicht gefunden!');
+  } else {
+    info.textContent = 'Gespeichert, aber Verbindung fehlgeschlagen: ' + res.data.message;
+  }
+  document.getElementById('accPass').value = '';
+  loadAccounts();
+}
+async function removeAccount(name){
+  if(!confirm('Konto "' + name + '" entfernen?')) return;
+  await jpost('/api/mail/accounts', {name: name}, 'DELETE');
+  loadAccounts();
+}
+
+/* ---------- Ordner ---------- */
+function renderFolderArea(accounts){
+  const area = document.getElementById('folderArea');
+  if(!accounts.length){ area.innerHTML = '<p class="muted">Erst ein Konto anlegen.</p>'; return; }
+  area.innerHTML = accounts.map(a =>
+    '<div data-account="' + esc(a.name) + '">' +
+    '<p class="hl-title">' + esc(a.name) +
+    ' <button class="btn btn-secondary" onclick="loadFolders(\\'' + esc(a.name) + '\\')">Ordner laden</button></p>' +
+    '<div class="folder-list hidden" id="fl-' + esc(a.name) + '"></div></div>').join('');
+}
+async function loadFolders(name){
+  const box = document.getElementById('fl-' + name);
+  box.classList.remove('hidden');
+  box.innerHTML = '<span class="muted">Lade ...</span>';
+  const j = await jget('/api/mail/folders?account=' + encodeURIComponent(name));
+  if(j.error){ box.innerHTML = '<span class="l-err">' + esc(j.error) + '</span>'; return; }
+  box.innerHTML = j.folders.map(f =>
+    '<label><input type="checkbox" class="folder-cb" data-account="' + esc(name) + '"' +
+    ' value="' + esc(f.name) + '"' + (f.skip ? '' : ' checked') + '> ' +
+    esc(f.name) + (f.skip ? ' <span class="muted">(übersprungen)</span>' : '') + '</label>').join('');
+}
+
+/* ---------- Scan ---------- */
+async function startScan(){
+  const byAccount = {};
+  document.querySelectorAll('.folder-cb:checked').forEach(cb => {
+    const a = cb.dataset.account;
+    if(!byAccount[a]) byAccount[a] = [];
+    byAccount[a].push(cb.value);
+  });
+  const selection = Object.keys(byAccount).map(a => ({account: a, folders: byAccount[a]}));
+  if(!selection.length){ alert('Bitte zuerst Ordner auswählen (Ordner laden, dann anhaken).'); return; }
+  const res = await jpost('/api/mail/scan', {
+    selection: selection,
+    min_age: document.getElementById('minAge').value
+  });
+  if(!res.ok){ alert(res.data.error); return; }
+  poll();
+}
+
+/* ---------- Ergebnis ---------- */
+async function loadResult(){
+  const j = await jget('/api/mail/result');
+  const area = document.getElementById('resultArea');
+  if(j.error){ area.innerHTML = '<p class="muted">' + esc(j.error) + '</p>'; return; }
+
+  selected = new Set();
+  j.groups.forEach(g => g.mails.forEach(m => { if(m.delete) selected.add(m.key); }));
+
+  const s = j.summary;
+  let html = '<div class="stat-grid">' +
+    '<div class="stat-tile"><div class="stat-value">' + s.total + '</div><div class="stat-label">Geprüft</div></div>' +
+    '<div class="stat-tile"><div class="stat-value">' + s.delete + '</div><div class="stat-label">Vorgeschlagen</div></div>' +
+    '<div class="stat-tile"><div class="stat-value">' + s.unsure + '</div><div class="stat-label">Unklar</div></div>' +
+    '<div class="stat-tile"><div class="stat-value" id="selCount">' + selected.size + '</div><div class="stat-label">Ausgewählt</div></div>' +
+    '</div>';
+
+  if(!j.groups.length){
+    area.innerHTML = html + '<p class="muted">Nichts zum Aufräumen gefunden.</p>';
+    updateCleanButton();
+    return;
+  }
+
+  html += j.groups.map((g, gi) =>
+    '<div class="group" id="g' + gi + '">' +
+      '<div class="group-head" onclick="toggleGroup(' + gi + ', event)">' +
+        '<input type="checkbox" onclick="toggleAll(' + gi + ', this, event)"' +
+          (g.mails.every(m => m.delete) ? ' checked' : '') + '>' +
+        '<span class="g-sender">' + esc(g.sender) + '</span>' +
+        (g.name ? '<span class="muted">' + esc(g.name) + '</span>' : '') +
+        '<span class="g-meta">' + g.mails.length + (g.mails.length === 1 ? ' Mail · ' : ' Mails · ') + kb(g.bytes) + '</span>' +
+      '</div>' +
+      '<div class="group-mails">' + g.mails.map(m =>
+        '<label class="mail-row">' +
+          '<input type="checkbox" class="mail-cb" data-group="' + gi + '" value="' + esc(m.key) + '"' +
+            (m.delete ? ' checked' : '') + ' onchange="onMailToggle(this)">' +
+          '<span class="m-body">' +
+            '<span class="m-subject">' + esc(m.subject || '(kein Betreff)') + '</span>' +
+            '<span class="m-why"><span class="pill pill-' + m.recommendation + '">' +
+              (m.recommendation === 'delete' ? 'löschen'
+                : (m.recommendation === 'unsure' ? 'unklar' : 'selbst gewählt')) + '</span> ' +
+              esc(m.reasons.join(', ')) + ' · ' + esc(m.folder) + '</span>' +
+          '</span>' +
+          '<span class="m-date">' + esc(m.date) + '<br>' + kb(m.size) + '</span>' +
+        '</label>').join('') +
+      '</div>' +
+    '</div>').join('');
+
+  area.innerHTML = html;
+  updateCleanButton();
+}
+function toggleGroup(gi, ev){
+  if(ev.target.tagName === 'INPUT') return;
+  document.getElementById('g' + gi).classList.toggle('open');
+}
+function toggleAll(gi, cb, ev){
+  ev.stopPropagation();
+  document.querySelectorAll('.mail-cb[data-group="' + gi + '"]').forEach(m => {
+    m.checked = cb.checked;
+    if(cb.checked) selected.add(m.value); else selected.delete(m.value);
+  });
+  refreshCount();
+}
+function onMailToggle(cb){
+  if(cb.checked) selected.add(cb.value); else selected.delete(cb.value);
+  refreshCount();
+}
+function refreshCount(){
+  const el = document.getElementById('selCount');
+  if(el) el.textContent = selected.size;
+  updateCleanButton();
+}
+function updateCleanButton(){
+  document.getElementById('btnRealClean').disabled = true;
+}
+
+/* ---------- Excel ---------- */
+async function uploadExcel(){
+  const f = document.getElementById('mailFile').files[0];
+  const info = document.getElementById('uploadInfo');
+  if(!f) return;
+  const fd = new FormData();
+  fd.append('file', f);
+  info.textContent = 'Lese Datei ...';
+  const r = await fetch('/api/mail/upload', {method: 'POST', body: fd});
+  const j = await r.json();
+  if(!r.ok){ info.textContent = 'Fehler: ' + j.error; return; }
+  info.textContent = j.gelesen + ' Zeilen gelesen, ' + j['geändert'] +
+    ' Häkchen geändert, ' + j['ausgewählt'] + ' Mails ausgewählt.';
+  loadResult();
+}
+
+/* ---------- Aufräumen ---------- */
+async function startClean(dryRun){
+  const res = await jpost('/api/mail/select', {keys: Array.from(selected)});
+  if(!res.ok){ alert(res.data.error); return; }
+  if(!dryRun && !confirm('Wirklich ' + selected.size +
+      ' Mails in den Papierkorb verschieben?')) return;
+  const started = await jpost('/api/mail/clean', {dry_run: dryRun});
+  if(!started.ok){ alert(started.data.error); return; }
+  poll();
+}
+
+/* ---------- Status ---------- */
+function poll(){
+  if(polling) clearInterval(polling);
+  polling = setInterval(refresh, 700);
+  refresh();
+}
+async function refresh(){
+  const j = await jget('/api/status');
+  const s = document.getElementById('status');
+  const busy = j.running && (j.kind === 'mailscan' || j.kind === 'mailclean');
+
+  document.getElementById('btnScan').disabled = j.running;
+  if(busy){
+    s.innerHTML = '<div class="card"><div class="status-head">' +
+      '<span class="spinner"></span><span class="status-title">' +
+      (j.kind === 'mailscan' ? 'Durchsuche Postfächer ...' : 'Räume auf ...') +
+      '</span></div><p class="muted">' + esc(j.message) + '</p></div>';
+    return;
+  }
+  if(polling){ clearInterval(polling); polling = null; }
+  if(j.error){
+    s.innerHTML = '<div class="card"><div class="status-head bad">' + I_BAD +
+      '<span class="status-title">Fehler</span></div><p>' + esc(j.error) + '</p></div>';
+    return;
+  }
+  if(!j.result || !j.result.kind){ s.innerHTML = ''; return; }
+
+  if(j.result.kind === 'scan'){
+    s.innerHTML = '<div class="card"><div class="status-head ok">' + I_OK +
+      '<span class="status-title">Durchsuchen fertig</span></div>' +
+      '<p class="muted">' + j.result.total + ' Mails geprüft, ' + j.result.delete +
+      ' vorgeschlagen. Bitte unten prüfen.</p></div>';
+    loadResult();
+  } else {
+    const r = j.result;
+    const head = r.dry_run ? 'Testlauf-Ergebnis (nichts verschoben)' : 'Aufgeräumt';
+    s.innerHTML = '<div class="card"><div class="status-head ' +
+      (r.dry_run ? 'warn-text' : 'ok') + '">' + (r.dry_run ? I_WARN : I_OK) +
+      '<span class="status-title">' + head + '</span></div>' +
+      '<div class="stat-grid">' +
+      '<div class="stat-tile"><div class="stat-value">' + r.moved + '</div><div class="stat-label">' +
+        (r.dry_run ? 'Würden weg' : 'Verschoben') + '</div></div>' +
+      '<div class="stat-tile' + (r.skipped ? ' stat-bad' : '') + '"><div class="stat-value">' +
+        r.skipped + '</div><div class="stat-label">Übersprungen</div></div>' +
+      '<div class="stat-tile' + (r.errors ? ' stat-bad' : '') + '"><div class="stat-value">' +
+        r.errors + '</div><div class="stat-label">Fehler</div></div>' +
+      '<div class="stat-tile"><div class="stat-value">' + r.total + '</div><div class="stat-label">Ausgewählt</div></div>' +
+      '</div>' +
+      (r.dry_run
+        ? '<div class="callout callout-info">' + I_OK +
+          '<div>Sieht das gut aus? Dann auf „Wirklich in den Papierkorb" klicken.</div></div>'
+        : '') +
+      (r.log.length ? '<p class="hl-title">Protokoll</p><div class="hl">' +
+        esc(r.log.join('\\n')) + '</div>' : '') +
+      '</div>';
+    document.getElementById('btnRealClean').disabled = !r.dry_run || !r.moved;
+    if(!r.dry_run){ loadResult(); loadLearned(); }
+  }
+}
+
+/* ---------- Gelernt ---------- */
+async function loadLearned(){
+  const j = await jget('/api/mail/learned');
+  const area = document.getElementById('learnedArea');
+  if(!j.rows || !j.rows.length){
+    area.innerHTML = '<p class="muted">Noch nichts gelernt - das passiert nach dem ersten echten Aufräumen.</p>';
+    return;
+  }
+  area.innerHTML = '<div class="hl">' + j.rows.map(r =>
+    r.sender + '  —  gelöscht: ' + r.deleted + ', behalten: ' + r.kept + '  →  ' + r.tendency
+  ).map(esc).join('<br>') + '</div>';
+}
+
+loadAccounts();
+loadResult();
+loadLearned();
+refresh();
+</script>
+</body>
+</html>
+"""
+
+
 if __name__ == "__main__":
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "5000"))
     print(f"iCloud Kontakte Sync - Web-Oberfläche")
     print(f"Öffne im Browser: http://{host}:{port}")
+    print(f"E-Mail aufräumen:  http://{host}:{port}/mail")
     app.run(host=host, port=port, debug=False)

@@ -6,6 +6,17 @@ Ein Python-Projekt, das iCloud-Kontakte via CardDAV exportiert und importiert,
 manuell per GitHub Actions Workflow im Browser gestartet werden kann,
 und die exportierte VCF-Datei als downloadbares Artifact bereitstellt.
 
+> **Stand heute:** Das Projekt ist über diese ursprüngliche Beschreibung
+> hinausgewachsen. Dazugekommen sind: ein Excel-Rundlauf zum Bearbeiten
+> (`to-excel`/`from-excel`), eine Web-Oberfläche (`icloud_web.py`), ein
+> optionaler Sync nach Google Contacts (`google_contacts.py`) und ein
+> Aufräumtool für IMAP-Postfächer (`mail_imap.py` + `mail_cleanup.py`).
+> Maßgeblich für den aktuellen Funktionsumfang ist die `README.md`.
+>
+> Durchgängiges Muster bei allem: **auslesen → in Excel oder im Browser
+> prüfen → Testlauf → wirklich schreiben**, mit Änderungserkennung, damit
+> nur geschrieben wird, was sich tatsächlich unterscheidet.
+
 ---
 
 ## Projektstruktur (zu erstellen)

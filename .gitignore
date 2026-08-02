@@ -5,3 +5,5 @@ web_data/
 __pycache__/
 .google_token.json
 client_secret*.json
+mail_accounts.json
+mail_decisions.json

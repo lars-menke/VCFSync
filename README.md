@@ -9,6 +9,10 @@ aktualisiert (keine Duplikate), neue Kontakte werden angelegt.
 Für den bequemen Alltag gibt es zusätzlich eine **Web-Oberfläche** mit Buttons
 (siehe unten), die Export und Import ohne Kommandozeile erledigt.
 
+Dazu gehört inzwischen auch ein **E-Mail-Aufräumtool** für IMAP-Postfächer
+(iCloud, Gmail und beliebige weitere) — siehe
+[E-Mail aufräumen](#e-mail-aufräumen).
+
 ## Web-Oberfläche (empfohlen)
 
 Statt die Befehle einzeln einzutippen, lässt sich alles per Knopfdruck über
@@ -287,6 +291,127 @@ nicht als „aktualisiert". Das spart bei großen Beständen fast alle
 Schreibzugriffe, wenn seit dem letzten Sync nur wenige Kontakte geändert
 wurden, und schont Googles Schreib-Quota entsprechend.
 
+## E-Mail aufräumen
+
+Durchsucht ausgewählte IMAP-Postfächer und -Ordner, bewertet jede Mail nach
+festen Regeln und schlägt begründet vor, was weg kann. Gedacht für Postfächer,
+in denen jahrelang alles nur einsortiert und nie gelöscht wurde.
+
+**Nichts wird endgültig gelöscht** — Mails wandern in den **Papierkorb** des
+jeweiligen Kontos und lassen sich dort zurückholen. Der Testlauf ist überall
+der Standard, ein echter Lauf braucht eine ausdrückliche Bestätigung.
+
+Es werden ausschließlich **Kopfzeilen** gelesen (Absender, Betreff, Datum,
+Newsletter-Kennzeichen), niemals Mail-Texte. Alles läuft lokal; es wird nichts
+an einen Dienst gesendet.
+
+### Postfächer einrichten
+
+Für iCloud und Gmail wird ein **app-spezifisches Passwort** gebraucht, nicht das
+normale Kennwort:
+
+- **iCloud** — [appleid.apple.com](https://appleid.apple.com) → Anmeldung und
+  Sicherheit → App-spezifische Passwörter. Server: `imap.mail.me.com:993`
+- **Gmail** — in den Google-Kontoeinstellungen IMAP aktivieren und ein
+  App-Passwort erzeugen. Server: `imap.gmail.com:993`
+- **Andere Anbieter** — Server und Port stehen beim jeweiligen Anbieter;
+  für GMX, web.de und Outlook sind Voreinstellungen hinterlegt.
+
+Anlegen entweder im Browser (Seite **E-Mail**, Karte „Postfächer") oder:
+
+```bash
+python mail_cleanup.py konten --add      # fragt alles ab, testet die Verbindung
+python mail_cleanup.py konten            # vorhandene Konten anzeigen
+python mail_cleanup.py konten --test     # alle Konten auf Erreichbarkeit prüfen
+```
+
+Die Zugangsdaten landen in `mail_accounts.json` — lokal und via `.gitignore`
+vom Commit ausgeschlossen.
+
+### Ablauf
+
+Im Browser: `python icloud_web.py` starten und oben rechts auf **E-Mail**
+wechseln. Dort führen die vier Karten der Reihe nach durch Postfächer →
+Durchsuchen → Prüfen → Aufräumen.
+
+Auf der Kommandozeile derselbe Ablauf:
+
+```bash
+# 1. Postfächer durchsuchen und bewerten (nur lesend)
+python mail_cleanup.py scan
+
+# 2. Als Excel-Liste zum Prüfen ausgeben
+python mail_cleanup.py to-excel
+
+# 3. In Excel die Spalte "Löschen" prüfen, dann zurücklesen
+python mail_cleanup.py from-excel --input mail_aufraeumen.xlsx
+
+# 4. Testlauf - es wird nichts verschoben
+python mail_cleanup.py clean
+
+# 5. Wirklich in den Papierkorb
+python mail_cleanup.py clean --execute
+```
+
+Einzelne Konten oder Ordner gezielt ansprechen:
+
+```bash
+python mail_cleanup.py konten --folders iCloud          # Ordner auflisten
+python mail_cleanup.py scan --account iCloud --folder INBOX --folder "Archiv 2023"
+python mail_cleanup.py scan --min-age 365               # nur Mails ab 1 Jahr
+```
+
+### Wonach bewertet wird
+
+Eine Mail wird **nie** vorgeschlagen, wenn sie markiert (Flagge) ist, du darauf
+geantwortet hast, es ein Entwurf ist, oder sie jünger als das Mindestalter
+(Standard 30 Tage) ist. Papierkorb, Entwürfe, Gesendet und Spam werden gar
+nicht erst durchsucht.
+
+Ansonsten zählen: Alter, Newsletter- und Massenmail-Kennzeichen
+(`List-Unsubscribe`, `List-Id`, `Precedence: bulk`), automatische Absender
+(`noreply@`, `notifications@` …), ob die Mail gelesen wurde, und die Größe.
+Vorangehakt wird nur, was deutlich genug zusammenkommt — alles Grenzwertige
+erscheint als „unklar" und muss selbst angekreuzt werden.
+
+### Das Tool lernt mit
+
+Nach jedem echten Aufräumen merkt sich das Tool pro Absender, was du bestätigt
+und was du bewusst stehen gelassen hast:
+
+- Absender, den du **dreimal gelöscht** und nie behalten hast → wird künftig
+  direkt zum Löschen vorgeschlagen.
+- Absender, den du **zweimal behalten** und nie gelöscht hast → wird künftig
+  gar nicht mehr vorgeschlagen, selbst wenn es ein uralter Newsletter ist.
+
+Gelernt wird nur aus Mails, die überhaupt zur Auswahl standen — über Mails, die
+nie vorgeschlagen wurden, hast du auch nichts entschieden.
+
+```bash
+python mail_cleanup.py gelernt           # anzeigen, was gelernt wurde
+python mail_cleanup.py gelernt --reset   # von vorn anfangen
+```
+
+Gespeichert wird das in `mail_decisions.json` (ebenfalls nicht im Git).
+
+### Sicherheitsnetze
+
+- Beim Durchsuchen wird der Ordner **schreibgeschützt** geöffnet.
+- Unmittelbar vor dem Verschieben prüft das Tool, ob der Ordner noch derselbe
+  ist (`UIDVALIDITY`) und ob hinter jeder Nummer noch dieselbe Mail steckt
+  (`Message-ID`). Passt etwas nicht, wird die Mail übersprungen statt auf gut
+  Glück gelöscht.
+- Höchstens 2000 Mails pro Lauf; darüber bricht das Tool ab und fragt nach
+  (`--force` hebt die Grenze auf).
+- Endgültig gelöscht (`EXPUNGE`) wird nur gezielt per UID. Kann der Server das
+  nicht, bleibt das Original lediglich als gelöscht markiert.
+
+### Gmail-Eigenheiten
+
+Gmail bildet Labels als IMAP-Ordner ab; eine Mail kann daher in mehreren
+Ordnern auftauchen. „Alle Nachrichten" wird bewusst nicht durchsucht.
+Verschieben in den Papierkorb entfernt die Mail bei Gmail aus allen Labels.
+
 ## Datenschutzhinweis
 
 - Repository unbedingt **privat** halten
@@ -298,3 +423,6 @@ wurden, und schont Googles Schreib-Quota entsprechend.
 - Die Google-OAuth-Client-JSON (`client_secret*.json`) und der gespeicherte
   Google-Token (`.google_token.json`) sind ebenfalls via `.gitignore`
   ausgeschlossen — niemals committen
+- Die E-Mail-Zugangsdaten (`mail_accounts.json`) und der Lernspeicher
+  (`mail_decisions.json`) enthalten Passwörter bzw. Absenderadressen und sind
+  ebenfalls via `.gitignore` ausgeschlossen — niemals committen
