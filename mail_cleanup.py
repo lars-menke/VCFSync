@@ -60,8 +60,11 @@ DEFAULT_SETTINGS = {
     "unsure_at": 35,             # darunter gilt "behalten"
 }
 
-# Obergrenze pro Lauf. Verhindert, dass ein Versehen (falscher Ordner, zu
-# scharfe Einstellung) auf einen Schlag das halbe Postfach räumt.
+# Portionsgröße beim echten Lauf. Eine größere Auswahl wird nicht abgelehnt,
+# sondern automatisch in mehreren Portionen dieser Größe abgearbeitet (siehe
+# clean()) - das bleibt trotzdem ein Sicherheitsnetz: geht bei einer Portion
+# etwas schief (falscher Ordner, Verbindungsabbruch), sind nicht gleich alle
+# betroffen, und das Protokoll zeigt es vor der nächsten Portion.
 MAX_PER_RUN = 2000
 
 # Absender, die praktisch nie eine Antwort erwarten.
@@ -981,44 +984,19 @@ def apply_selection(scan, keys):
 # Ausführen
 # ---------------------------------------------------------------------------
 
-def clean(scan, dry_run=True, force=False, progress=None):
-    """Verschiebt die angehakten Mails in den Papierkorb des jeweiligen Kontos.
-
-    Testlauf ist der Standard. Beim echten Lauf werden anschließend die
-    Entscheidungen gelernt - und zwar nur über Mails, die überhaupt zur
-    Auswahl standen (Empfehlung 'löschen' oder 'unklar'). Über Mails, die nie
-    vorgeschlagen wurden, hat der Nutzer auch nichts entschieden; sie als
-    'behalten' zu zählen würde den Lernspeicher mit Zufallsdaten fluten.
+def _move_portion(scan, wanted, dry_run, progress, result):
+    """Verschiebt genau die durch wanted benannten Mails - {(konto, ordner,
+    uid), ...}. Kern eines einzelnen Durchgangs; clean() ruft das für den
+    Testlauf einmal mit der vollen Auswahl auf, beim echten Lauf einmal je
+    Portion. result wird dabei direkt ergänzt (Zähler, Protokoll).
     """
-    result = {"moved": 0, "flagged": 0, "failed": 0, "skipped": 0, "errors": 0,
-              "total": 0, "trash": {}, "log": [], "dry_run": dry_run}
-
-    selected = [(acc, folder, mail) for acc, folder, mail in iter_mails(scan)
-                if mail.get("delete")]
-    result["total"] = len(selected)
-    if not selected:
-        result["log"].append("Nichts ausgewählt - es gibt nichts zu tun.")
-        return result
-
-    if len(selected) > MAX_PER_RUN and not force:
-        raise RuntimeError(
-            f"{len(selected)} Mails ausgewählt - das ist mehr als die "
-            f"Sicherheitsgrenze von {MAX_PER_RUN} pro Lauf. Bitte die Auswahl "
-            "prüfen (stimmen Ordner und Einstellungen?) oder den Lauf mit "
-            "--force bzw. in kleineren Portionen wiederholen.")
-
-    # Vor dem Lauf festhalten, woraus gelernt wird: weiter unten fallen die
-    # erledigten Mails aus dem Scan heraus, und ausgerechnet die gelöschten sind
-    # das wichtigste Signal. Die Dicts bleiben gültig, auch wenn die Liste, in
-    # der sie stehen, später ausgedünnt wird.
-    reviewed = [m for _a, _f, m in iter_mails(scan)
-                if m.get("recommendation") in ("delete", "unsure")]
-
     for acc in scan.get("accounts", []):
         by_folder = {}
         for folder in acc.get("folders", []):
             items = [{"uid": m["uid"], "message_id": m.get("message_id", "")}
-                     for m in folder.get("mails", []) if m.get("delete")]
+                     for m in folder.get("mails", [])
+                     if m.get("delete")
+                     and (acc["account"], folder["folder"], m["uid"]) in wanted]
             if items:
                 by_folder[folder["folder"]] = (items, folder.get("uidvalidity"))
         if not by_folder:
@@ -1066,6 +1044,50 @@ def clean(scan, dry_run=True, force=False, progress=None):
                     _forget_moved(scan, acc, folder_name, part)
         finally:
             mi.close(conn)
+
+
+def clean(scan, dry_run=True, progress=None):
+    """Verschiebt die angehakten Mails in den Papierkorb des jeweiligen Kontos.
+
+    Testlauf ist der Standard. Beim echten Lauf werden anschließend die
+    Entscheidungen gelernt - und zwar nur über Mails, die überhaupt zur
+    Auswahl standen (Empfehlung 'löschen' oder 'unklar'). Über Mails, die nie
+    vorgeschlagen wurden, hat der Nutzer auch nichts entschieden; sie als
+    'behalten' zu zählen würde den Lernspeicher mit Zufallsdaten fluten.
+
+    Eine große Auswahl wird beim echten Lauf automatisch in Portionen von je
+    MAX_PER_RUN Mails abgearbeitet, nicht in einem Rutsch - siehe MAX_PER_RUN.
+    Der Testlauf schreibt ohnehin nichts und zeigt die volle Auswahl auf einmal.
+    """
+    result = {"moved": 0, "flagged": 0, "failed": 0, "skipped": 0, "errors": 0,
+              "total": 0, "trash": {}, "log": [], "dry_run": dry_run}
+
+    selected = [(acc, folder, mail) for acc, folder, mail in iter_mails(scan)
+                if mail.get("delete")]
+    result["total"] = len(selected)
+    if not selected:
+        result["log"].append("Nichts ausgewählt - es gibt nichts zu tun.")
+        return result
+
+    # Vor dem Lauf festhalten, woraus gelernt wird: weiter unten fallen die
+    # erledigten Mails aus dem Scan heraus, und ausgerechnet die gelöschten sind
+    # das wichtigste Signal. Die Dicts bleiben gültig, auch wenn die Liste, in
+    # der sie stehen, später ausgedünnt wird.
+    reviewed = [m for _a, _f, m in iter_mails(scan)
+                if m.get("recommendation") in ("delete", "unsure")]
+
+    portions = [selected] if dry_run else [
+        selected[i:i + MAX_PER_RUN] for i in range(0, len(selected), MAX_PER_RUN)]
+
+    for index, portion in enumerate(portions, 1):
+        if len(portions) > 1 and progress:
+            progress(f"Portion {index}/{len(portions)} ({len(portion)} Mails) ...")
+        wanted = {(acc["account"], folder["folder"], mail["uid"])
+                 for acc, folder, mail in portion}
+        if len(portions) > 1:
+            result["log"].append(f"--- Portion {index}/{len(portions)}: "
+                                 f"{len(portion)} Mails ---")
+        _move_portion(scan, wanted, dry_run, progress, result)
 
     if not dry_run:
         # "delete" ist nur die Auswahl - ob die Mail wirklich weg ist, weiß
@@ -1251,7 +1273,7 @@ def cmd_clean(args):
     dry_run = not args.execute
     if dry_run:
         print("TESTLAUF: Es wird nichts verschoben. Echter Lauf mit --execute.\n")
-    result = clean(scan, dry_run=dry_run, force=args.force,
+    result = clean(scan, dry_run=dry_run,
                    progress=lambda m: print(f"  {m}", flush=True))
     for line in result["log"]:
         print(f"  {line}")
@@ -1425,8 +1447,6 @@ def main():
     clean_p = sub.add_parser("clean", help="Ausgewählte Mails in den Papierkorb verschieben")
     clean_p.add_argument("--execute", action="store_true",
                          help="Wirklich verschieben (ohne diese Angabe nur Testlauf)")
-    clean_p.add_argument("--force", action="store_true",
-                         help=f"Sicherheitsgrenze von {MAX_PER_RUN} Mails pro Lauf aufheben")
 
     regeln = sub.add_parser("regeln", help="Eigene Regeln anzeigen und pflegen")
     regeln.add_argument("--nie", action="append", metavar="ABSENDER",

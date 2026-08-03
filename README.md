@@ -513,8 +513,10 @@ Gespeichert wird das in `mail_decisions.json` (ebenfalls nicht im Git).
   ist (`UIDVALIDITY`) und ob hinter jeder Nummer noch dieselbe Mail steckt
   (`Message-ID`). Passt etwas nicht, wird die Mail übersprungen statt auf gut
   Glück gelöscht.
-- Höchstens 2000 Mails pro Lauf; darüber bricht das Tool ab und fragt nach
-  (`--force` hebt die Grenze auf).
+- Eine große Auswahl wird beim echten Lauf automatisch in Portionen von je
+  2000 Mails abgearbeitet, nicht in einem Rutsch — geht bei einer Portion
+  etwas schief, sind nicht gleich alle betroffen, und das Protokoll zeigt es
+  vor der nächsten Portion.
 - Endgültig gelöscht (`EXPUNGE`) wird nur gezielt per UID. Kann der Server das
   nicht, bleibt das Original lediglich als gelöscht markiert.
 - **Nach** dem Verschieben wird nachgesehen, was tatsächlich verschwunden ist.
