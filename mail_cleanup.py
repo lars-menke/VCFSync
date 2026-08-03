@@ -782,6 +782,10 @@ def cmd_konten(args):
         user = input("Benutzername (meist die E-Mail-Adresse): ").strip()
         print("Bei iCloud und Gmail wird ein APP-SPEZIFISCHES Passwort gebraucht,")
         print("nicht das normale Kennwort.")
+        # Ohne diesen Hinweis wirkt die Eingabe wie eingefroren: getpass zeigt
+        # beim Tippen bewusst gar nichts an - keine Zeichen, keine Sternchen.
+        print("Hinweis: Die Eingabe bleibt unsichtbar (auch keine Sternchen).")
+        print("         Einfach tippen bzw. einfügen und Enter drücken.")
         password = getpass("Passwort: ")
         if not (name and host and user and password):
             print("Abgebrochen - es fehlten Angaben.")
