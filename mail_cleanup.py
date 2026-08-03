@@ -126,6 +126,49 @@ def test_account(account):
         mi.close(conn)
 
 
+def diagnose_account(account, progress=None):
+    """Postfach durchleuchten - streng nur lesend.
+
+    Beantwortet die Frage "warum sehe ich im Mailprogramm keine Löschungen?"
+    ohne Raten: Kann der Server überhaupt verschieben? Welchen Ordner hält das
+    Werkzeug für den Papierkorb, und woran hat es das festgemacht? Und liegen
+    irgendwo Mails herum, die nur als gelöscht markiert sind?
+    """
+    conn = connect_account(account)
+    try:
+        folders = mi.list_folders(conn)
+        trash, trash_via = mi.find_trash_detail(folders)
+        method = mi.planned_method(conn)
+        out = {
+            "account": account["name"],
+            "can_move": mi.has_capability(conn, "MOVE"),
+            "can_uidplus": mi.has_capability(conn, "UIDPLUS"),
+            "method": method,
+            "method_text": mi.METHOD_DE[method],
+            "trash": trash,
+            "trash_via": trash_via,
+            "folders": [],
+        }
+        for name, flags in folders:
+            if "\\noselect" in [f.lower() for f in flags]:
+                continue
+            if progress:
+                progress(f"{account['name']}: zähle '{name}' ...")
+            try:
+                total, deleted = mi.folder_stats(conn, name)
+                error = None
+            except Exception as e:  # noqa: BLE001 - ein sperriger Ordner darf
+                total = deleted = None      # den ganzen Bericht nicht kippen
+                error = str(e)
+            out["folders"].append({
+                "name": name, "flags": flags, "total": total,
+                "deleted": deleted, "is_trash": name == trash, "error": error,
+            })
+        return out
+    finally:
+        mi.close(conn)
+
+
 def list_account_folders(account):
     """Ordner eines Kontos mit Kennzeichen, ob sie zum Scannen taugen."""
     conn = connect_account(account)
@@ -684,8 +727,8 @@ def clean(scan, dry_run=True, force=False, progress=None):
     vorgeschlagen wurden, hat der Nutzer auch nichts entschieden; sie als
     'behalten' zu zählen würde den Lernspeicher mit Zufallsdaten fluten.
     """
-    result = {"moved": 0, "skipped": 0, "errors": 0, "total": 0, "log": [],
-              "dry_run": dry_run}
+    result = {"moved": 0, "flagged": 0, "failed": 0, "skipped": 0, "errors": 0,
+              "total": 0, "trash": {}, "log": [], "dry_run": dry_run}
 
     selected = [(acc, folder, mail) for acc, folder, mail in iter_mails(scan)
                 if mail.get("delete")]
@@ -700,6 +743,13 @@ def clean(scan, dry_run=True, force=False, progress=None):
             f"Sicherheitsgrenze von {MAX_PER_RUN} pro Lauf. Bitte die Auswahl "
             "prüfen (stimmen Ordner und Einstellungen?) oder den Lauf mit "
             "--force bzw. in kleineren Portionen wiederholen.")
+
+    # Vor dem Lauf festhalten, woraus gelernt wird: weiter unten fallen die
+    # erledigten Mails aus dem Scan heraus, und ausgerechnet die gelöschten sind
+    # das wichtigste Signal. Die Dicts bleiben gültig, auch wenn die Liste, in
+    # der sie stehen, später ausgedünnt wird.
+    reviewed = [m for _a, _f, m in iter_mails(scan)
+                if m.get("recommendation") in ("delete", "unsure")]
 
     for acc in scan.get("accounts", []):
         by_folder = {}
@@ -729,6 +779,7 @@ def clean(scan, dry_run=True, force=False, progress=None):
             result["log"].append(f"FEHLER: Konto '{acc['account']}' nicht erreichbar: {e}")
             continue
 
+        result["trash"][acc["account"]] = trash
         try:
             for folder_name, (items, uidvalidity) in by_folder.items():
                 if progress:
@@ -736,16 +787,23 @@ def clean(scan, dry_run=True, force=False, progress=None):
                 part = mi.move_to_trash(conn, folder_name, items, trash,
                                         expected_uidvalidity=uidvalidity,
                                         dry_run=dry_run)
-                for key in ("moved", "skipped", "errors"):
+                for key in ("moved", "flagged", "failed", "skipped", "errors"):
                     result[key] += part[key]
+                # Immer sagen, wohin - nicht nur im Fehlerfall. Ohne diese Zeile
+                # steht im Protokoll eines erfolgreichen Laufs gar nichts, und
+                # niemand kann nachvollziehen, wo die Mails gelandet sind.
+                if not dry_run and part["moved"]:
+                    result["log"].append(
+                        f"{acc['account']} / {folder_name}: {part['moved']} Mails nach "
+                        f"'{trash}' verschoben (nachgeprüft: sie sind dort weg).")
                 result["log"].extend(
                     f"{acc['account']} / {folder_name}: {line}" for line in part["log"])
+                if not dry_run:
+                    _forget_moved(scan, acc, folder_name, part)
         finally:
             mi.close(conn)
 
     if not dry_run:
-        reviewed = [m for _a, _f, m in iter_mails(scan)
-                    if m.get("recommendation") in ("delete", "unsure")]
         save_decisions(record_decisions(reviewed))
         result["log"].append(
             f"Gelernt aus {len(reviewed)} geprüften Vorschlägen "
@@ -753,6 +811,29 @@ def clean(scan, dry_run=True, force=False, progress=None):
         scan["executed"] = datetime.now(timezone.utc).isoformat()
         save_scan(scan)
     return result
+
+
+def _forget_moved(scan, acc, folder_name, part):
+    """Erledigte Mails aus dem Scan nehmen.
+
+    Was wirklich weg ist, hat in der Liste nichts mehr zu suchen - sonst steht
+    nach dem Aufräumen alles unverändert da, als wäre nichts geschehen. Nur
+    markierte Mails bleiben stehen: sie liegen ja noch im Postfach.
+    """
+    if not part["moved"]:
+        return
+    for folder in acc.get("folders", []):
+        if folder["folder"] != folder_name:
+            continue
+        if part["flagged"] or part["failed"]:
+            # Es steht nicht fest, welche einzelne Mail weg ist und welche
+            # liegen blieb - dann lieber alles stehen lassen und beim nächsten
+            # Scan sauber neu feststellen, als die falschen zu entfernen.
+            for mail in folder.get("mails", []):
+                if mail.get("delete"):
+                    mail["moved_unclear"] = True
+            return
+        folder["mails"] = [m for m in folder.get("mails", []) if not m.get("delete")]
 
 
 # ---------------------------------------------------------------------------
@@ -878,12 +959,52 @@ def cmd_clean(args):
                    progress=lambda m: print(f"  {m}", flush=True))
     for line in result["log"]:
         print(f"  {line}")
-    verb = "würden verschoben" if dry_run else "verschoben"
+    verb = "würden verschoben" if dry_run else "nachweislich verschoben"
     print(f"\n{result['moved']} Mails {verb}, {result['skipped']} übersprungen, "
           f"{result['errors']} Fehler (von {result['total']} ausgewählten).")
+    if result["flagged"]:
+        print(f"{result['flagged']} Mails wurden NUR ALS GELÖSCHT MARKIERT und "
+              "liegen weiter im Ordner.")
+    if result["failed"]:
+        print(f"{result['failed']} Mails sind trotz Erfolgsmeldung des Servers "
+              "noch da.")
     if dry_run and result["moved"]:
         print("\nSieht das gut aus? Dann:")
         print("  python mail_cleanup.py clean --execute")
+    if (result["flagged"] or result["failed"]) and not dry_run:
+        print("\nWas dahintersteckt, zeigt:")
+        print("  python mail_cleanup.py diagnose")
+
+
+def cmd_diagnose(args):
+    """Postfach durchleuchten - beantwortet 'warum sehe ich keine Löschungen?'."""
+    accounts = load_accounts()
+    if args.account:
+        accounts = [account_by_name(args.account)]
+    if not accounts:
+        print("Noch keine Konten eingerichtet.")
+        return
+    for account in accounts:
+        info = diagnose_account(account, progress=lambda m: print(f"  {m}", flush=True))
+        print(f"\n=== {info['account']} ===")
+        print(f"Server kann MOVE:    {'ja' if info['can_move'] else 'NEIN'}")
+        print(f"Server kann UIDPLUS: {'ja' if info['can_uidplus'] else 'NEIN'}")
+        print(f"Verfahren beim Aufräumen: {info['method_text']}")
+        if info["method"] == "copy_flag":
+            print("  -> Dieser Server verschiebt NICHT. Mails werden in den")
+            print("     Papierkorb kopiert und im Ordner nur markiert. Genau")
+            print("     deshalb sieht man im Mailprogramm keine Löschung.")
+        via = {"flag": "über das \\Trash-Kennzeichen des Servers",
+               "name": "ÜBER DEN NAMEN GERATEN", None: ""}[info["trash_via"]]
+        print(f"Papierkorb: {info['trash'] or 'NICHT GEFUNDEN'} {via}".rstrip())
+        print(f"\n{'Ordner':<34} {'Mails':>8} {'davon gelöscht-markiert':>24}")
+        for folder in info["folders"]:
+            mark = " <- Papierkorb" if folder["is_trash"] else ""
+            if folder["error"]:
+                print(f"{folder['name']:<34} {'?':>8} {folder['error']}")
+                continue
+            print(f"{folder['name']:<34} {folder['total']:>8} "
+                  f"{folder['deleted']:>24}{mark}")
 
 
 _RULE_LABELS = {
@@ -989,10 +1110,15 @@ def main():
     gelernt = sub.add_parser("gelernt", help="Zeigen, was aus deinen Entscheidungen gelernt wurde")
     gelernt.add_argument("--reset", action="store_true", help="Lernspeicher leeren")
 
+    diagnose = sub.add_parser(
+        "diagnose", help="Postfach prüfen: kann der Server verschieben, wo ist "
+                         "der Papierkorb? (nur lesend)")
+    diagnose.add_argument("--account", metavar="NAME", help="Nur dieses Konto")
+
     args = parser.parse_args()
     handlers = {"konten": cmd_konten, "scan": cmd_scan, "to-excel": cmd_to_excel,
                 "from-excel": cmd_from_excel, "clean": cmd_clean, "regeln": cmd_regeln,
-                "gelernt": cmd_gelernt}
+                "gelernt": cmd_gelernt, "diagnose": cmd_diagnose}
     try:
         handlers[args.cmd](args)
     except RuntimeError as e:

@@ -358,6 +358,16 @@ def api_mail_folders():
         return _mail_error(e)
 
 
+@app.route("/api/mail/diagnose")
+def api_mail_diagnose():
+    """Postfach durchleuchten - rein lesend, deshalb ohne Hintergrundaufgabe."""
+    name = request.args.get("account", "")
+    try:
+        return jsonify(mc.diagnose_account(mc.account_by_name(name)))
+    except Exception as e:  # noqa: BLE001
+        return _mail_error(e)
+
+
 @app.route("/api/mail/scan", methods=["POST"])
 def api_mail_scan():
     data = request.json or {}
@@ -714,6 +724,15 @@ BASE_CSS = """
   .callout svg { width: 18px; height: 18px; flex: none; margin-top: .05rem; }
   .callout-danger { background: var(--color-danger-soft); color: var(--color-danger); }
   .callout-info { background: var(--color-primary-soft); color: var(--color-primary); }
+  .callout-warn { background: var(--color-warning-soft); color: var(--color-warning); }
+
+  .diag { margin: .5rem 0 1rem; }
+  .diag-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  .diag-table th, .diag-table td { padding: .35rem .5rem; text-align: left;
+                                   border-bottom: 1px solid var(--color-border); }
+  .diag-table th { color: var(--color-text-muted); font-weight: 600; }
+  .diag-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .diag-table .diag-hit td { background: var(--color-warning-soft); }
 
   .hl {
     font-family: var(--font-mono); font-size: .78rem; line-height: 1.65;
@@ -1390,10 +1409,56 @@ async function loadAccounts(){
       '<div class="acc-row"><span class="acc-name">' + esc(a.name) + '</span>' +
       '<span class="acc-detail">' + esc(a.user) + ' · ' + esc(a.host) + ':' + a.port + '</span>' +
       '<span class="acc-actions">' +
+      '<button class="btn btn-secondary" onclick="diagnose(\\'' + esc(a.name) + '\\')">Postfach prüfen</button> ' +
       '<button class="btn btn-secondary" onclick="removeAccount(\\'' + esc(a.name) + '\\')">Entfernen</button>' +
-      '</span></div>').join('');
+      '</span></div>' +
+      '<div class="diag hidden" id="diag-' + esc(a.name) + '"></div>').join('');
   }
   renderFolderArea(j.accounts);
+}
+
+/* ---------- Postfach prüfen ----------
+   Beantwortet "warum sehe ich im Mailprogramm keine Löschungen?" - liest nur. */
+async function diagnose(name){
+  const box = document.getElementById('diag-' + name);
+  box.classList.remove('hidden');
+  box.innerHTML = '<p class="muted">Prüfe Postfach ...</p>';
+  const j = await jget('/api/mail/diagnose?account=' + encodeURIComponent(name));
+  if(j.error){ box.innerHTML = '<span class="l-err">' + esc(j.error) + '</span>'; return; }
+
+  let head = '';
+  if(j.method === 'copy_flag'){
+    head = '<div class="callout callout-warn">' + I_WARN + '<div><b>Dieser Server ' +
+      'kann Mails nicht selbst verschieben.</b> Beim Aufräumen werden sie in den ' +
+      'Papierkorb kopiert und im Ordner nur als gelöscht markiert — sie bleiben ' +
+      'liegen. Viele Mailprogramme zeigen solche Mails ganz normal an. Genau so ' +
+      'sieht es aus, als wäre nichts passiert.</div></div>';
+  } else {
+    head = '<div class="callout callout-info">' + I_OK + '<div>Der Server kann Mails ' +
+      'selbst verschieben (' + esc(j.method_text) + ').</div></div>';
+  }
+  if(!j.trash){
+    head += '<div class="callout callout-warn">' + I_WARN + '<div>Es wurde <b>kein ' +
+      'Papierkorb gefunden</b> — ohne Ziel kann nichts verschoben werden.</div></div>';
+  } else if(j.trash_via === 'name'){
+    head += '<div class="callout callout-warn">' + I_WARN + '<div>Der Papierkorb ' +
+      '„' + esc(j.trash) + '" wurde <b>über den Namen geraten</b>, der Server nennt ' +
+      'ihn nicht selbst. Bitte im Mailprogramm nachsehen, ob das der richtige ' +
+      'Ordner ist.</div></div>';
+  }
+
+  box.innerHTML = head +
+    '<p class="hl-title">Ordner</p><table class="diag-table"><thead><tr>' +
+    '<th>Ordner</th><th class="num">Mails</th><th class="num">nur markiert</th></tr></thead><tbody>' +
+    j.folders.map(f =>
+      '<tr' + (f.deleted ? ' class="diag-hit"' : '') + '><td>' + esc(f.name) +
+      (f.is_trash ? ' <span class="muted">(Papierkorb)</span>' : '') + '</td>' +
+      '<td class="num">' + (f.error ? '?' : f.total) + '</td>' +
+      '<td class="num">' + (f.error ? esc(f.error) : f.deleted) + '</td></tr>').join('') +
+    '</tbody></table>' +
+    '<p class="muted">„Nur markiert" heißt: als gelöscht gekennzeichnet, aber noch ' +
+    'im Ordner. Stehen hier Zahlen, sind das genau die Mails, die im Mailprogramm ' +
+    'noch auftauchen.</p>';
 }
 function toggleAccountForm(){
   document.getElementById('accountForm').classList.toggle('hidden');
@@ -1663,19 +1728,42 @@ async function refresh(){
     loadResult();
   } else {
     const r = j.result;
-    const head = r.dry_run ? 'Testlauf-Ergebnis (nichts verschoben)' : 'Aufgeräumt';
+    const flagged = r.flagged || 0, failed = r.failed || 0;
+    // "Aufgeräumt" nur, wenn wirklich etwas wegkam und nichts liegen blieb.
+    const clean_ok = r.moved > 0 && !failed && !flagged;
+    const head = r.dry_run ? 'Testlauf-Ergebnis (nichts verschoben)'
+               : clean_ok ? 'Aufgeräumt'
+               : 'Durchgelaufen — bitte nachlesen';
+    const trash = Object.entries(r.trash || {})
+      .map(([acc, t]) => acc + ' → ' + (t || 'kein Papierkorb!')).join(', ');
+
     s.innerHTML = '<div class="card"><div class="status-head ' +
-      (r.dry_run ? 'warn-text' : 'ok') + '">' + (r.dry_run ? I_WARN : I_OK) +
+      (r.dry_run || !clean_ok ? 'warn-text' : 'ok') + '">' +
+      (r.dry_run || !clean_ok ? I_WARN : I_OK) +
       '<span class="status-title">' + head + '</span></div>' +
+      (trash ? '<p class="muted">Papierkorb: ' + esc(trash) + '</p>' : '') +
       '<div class="stat-grid">' +
       '<div class="stat-tile"><div class="stat-value">' + r.moved + '</div><div class="stat-label">' +
-        (r.dry_run ? 'Würden weg' : 'Verschoben') + '</div></div>' +
+        (r.dry_run ? 'Würden weg' : 'Nachweislich weg') + '</div></div>' +
+      (flagged ? '<div class="stat-tile stat-bad"><div class="stat-value">' + flagged +
+        '</div><div class="stat-label">Nur markiert</div></div>' : '') +
+      (failed ? '<div class="stat-tile stat-bad"><div class="stat-value">' + failed +
+        '</div><div class="stat-label">Noch da</div></div>' : '') +
       '<div class="stat-tile' + (r.skipped ? ' stat-bad' : '') + '"><div class="stat-value">' +
         r.skipped + '</div><div class="stat-label">Übersprungen</div></div>' +
       '<div class="stat-tile' + (r.errors ? ' stat-bad' : '') + '"><div class="stat-value">' +
         r.errors + '</div><div class="stat-label">Fehler</div></div>' +
       '<div class="stat-tile"><div class="stat-value">' + r.total + '</div><div class="stat-label">Ausgewählt</div></div>' +
       '</div>' +
+      (flagged ? '<div class="callout callout-warn">' + I_WARN + '<div><b>Dein Server ' +
+        'kann Mails nicht selbst verschieben.</b> Die ' + flagged + ' Mails liegen ' +
+        'jetzt als Kopie im Papierkorb, im Ursprungsordner sind sie nur als gelöscht ' +
+        'markiert — deshalb zeigen viele Mailprogramme sie weiter an. Im Mailprogramm ' +
+        'hilft „Ordner aufräumen" bzw. „Gelöschte endgültig entfernen".</div></div>' : '') +
+      (failed ? '<div class="callout callout-danger">' + I_BAD + '<div><b>' + failed +
+        ' Mails sind noch da.</b> Der Server hat den Befehl mit Erfolg beantwortet, ' +
+        'beim Nachsehen lagen die Mails aber unverändert im Ordner. Über „Postfach ' +
+        'prüfen" oben lässt sich nachsehen, woran es liegt.</div></div>' : '') +
       (r.dry_run
         ? '<div class="callout callout-info">' + I_OK +
           '<div>Sieht das gut aus? Dann auf „Wirklich in den Papierkorb" klicken.</div></div>'

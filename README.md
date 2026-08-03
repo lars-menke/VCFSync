@@ -359,6 +359,7 @@ Einzelne Konten oder Ordner gezielt ansprechen:
 python mail_cleanup.py konten --folders iCloud          # Ordner auflisten
 python mail_cleanup.py scan --account iCloud --folder INBOX --folder "Archiv 2023"
 python mail_cleanup.py scan --min-age 365               # nur Mails ab 1 Jahr
+python mail_cleanup.py diagnose                         # Postfach prüfen (nur lesend)
 ```
 
 ### Wonach bewertet wird
@@ -470,6 +471,42 @@ Gespeichert wird das in `mail_decisions.json` (ebenfalls nicht im Git).
   (`--force` hebt die Grenze auf).
 - Endgültig gelöscht (`EXPUNGE`) wird nur gezielt per UID. Kann der Server das
   nicht, bleibt das Original lediglich als gelöscht markiert.
+- **Nach** dem Verschieben wird nachgesehen, was tatsächlich verschwunden ist.
+  Als „verschoben" zählt nur, was wirklich weg ist — nicht das, was der Server
+  bloß mit „OK" beantwortet hat.
+
+### Im Mailprogramm ist nichts passiert
+
+Wenn das Aufräumen durchläuft, im Mailprogramm aber alles beim Alten aussieht,
+gibt es drei Erklärungen. Welche zutrifft, zeigt:
+
+```bash
+python mail_cleanup.py diagnose
+```
+
+Im Browser macht das der Knopf **Postfach prüfen** neben dem Konto. Beides liest
+nur und verändert nichts.
+
+**1. Der Server kann Mails nicht verschieben.** Steht in der Ausgabe
+`Server kann MOVE: NEIN` und `Server kann UIDPLUS: NEIN`, dann beherrscht er
+weder `MOVE` noch gezieltes `UID EXPUNGE`. Das Tool kann die Mail dann nur in
+den Papierkorb *kopieren* und im Ordner als gelöscht *markieren* — sie bleibt
+liegen, und viele Mailprogramme zeigen sie ganz normal weiter an. Solche Mails
+erscheinen in der Diagnose in der Spalte „davon gelöscht-markiert" und im
+Ergebnis als **„Nur markiert"**, nicht als verschoben.
+
+*Was hilft:* im Mailprogramm „Ordner aufräumen" bzw. „Gelöschte endgültig
+entfernen". Ein blankes `EXPUNGE` setzt das Tool bewusst nicht ab — das würde
+auch Mails endgültig löschen, die man selbst irgendwann mal markiert hat.
+
+**2. Der Papierkorb ist ein anderer Ordner als gedacht.** Nennt der Server
+seinen Papierkorb nicht selbst, rät das Tool über bekannte Namen. Die Diagnose
+schreibt in dem Fall `ÜBER DEN NAMEN GERATEN` dazu. Dann im Mailprogramm
+nachsehen, ob die Mails in dem genannten Ordner gelandet sind.
+
+**3. Das Mailprogramm zeigt einen alten Stand.** Outlook im
+Zwischenspeicher-Modus oder eine lang offene IMAP-Sitzung merken die Änderung
+nicht sofort. Einmal Senden/Empfangen oder das Programm neu starten.
 
 ### Gmail-Eigenheiten
 

@@ -219,17 +219,27 @@ def is_skipped_folder(name, flags):
     return name.strip().lower() in SKIP_FOLDER_NAMES
 
 
-def find_trash(folders):
-    """Papierkorb-Ordner bestimmen: bevorzugt über das \\Trash-Sonderflag
-    (RFC 6154), sonst über bekannte Namen. None, wenn nichts passt."""
+def find_trash_detail(folders):
+    """(Papierkorb, Erkennungsweg): bevorzugt über das \\Trash-Sonderflag
+    (RFC 6154), sonst über bekannte Namen.
+
+    Der Erkennungsweg ist "flag", "name" oder None. Er gehört mit ausgegeben:
+    ein über den Namen geratener Papierkorb kann der falsche Ordner sein, und
+    dann landen die Mails woanders, als der Nutzer erwartet.
+    """
     for name, flags in folders:
         if any(f.lower() == "\\trash" for f in flags):
-            return name
+            return name, "flag"
     lookup = {name.strip().lower(): name for name, _ in folders}
     for candidate in TRASH_NAMES:
         if candidate in lookup:
-            return lookup[candidate]
-    return None
+            return lookup[candidate], "name"
+    return None, None
+
+
+def find_trash(folders):
+    """Papierkorb-Ordner bestimmen. None, wenn nichts passt."""
+    return find_trash_detail(folders)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +386,22 @@ def _parse_fetch_response(data):
     return mails
 
 
+def folder_stats(conn, folder):
+    """(Anzahl Mails, davon als gelöscht markiert) - rein lesend.
+
+    Die zweite Zahl ist der Fingerabdruck des Rückfallwegs: Mails, die kopiert
+    und nur markiert wurden, stapeln sich hier an.
+    """
+    typ, _ = conn.select(_quote(folder), readonly=True)
+    if typ != "OK":
+        raise RuntimeError(f"Ordner '{folder}' konnte nicht geöffnet werden.")
+    counts = []
+    for criteria in (("ALL",), ("DELETED",)):
+        typ, data = conn.uid("SEARCH", None, *criteria)
+        counts.append(len((data[0] or b"").split()) if typ == "OK" else None)
+    return counts[0], counts[1]
+
+
 def get_uidvalidity(conn):
     """UIDVALIDITY des gerade gewählten Ordners. Ändert sich der Wert, sind alle
     früher notierten UIDs wertlos - dann darf nichts mehr gelöscht werden."""
@@ -450,6 +476,33 @@ def fetch_message_ids(conn, uids):
 # Verschieben
 # ---------------------------------------------------------------------------
 
+def uids_still_present(conn, uids):
+    """Welche der UIDs im aktuell gewählten Ordner noch liegen.
+
+    Grundlage der Nachprüfung: ein "OK" des Servers heißt nur, dass er den
+    Befehl angenommen hat - nicht, dass die Mail auch wirklich weg ist.
+    """
+    uids = list(uids)
+    if not uids:
+        return set()
+    still = set()
+    for start in range(0, len(uids), FETCH_BATCH):
+        block = uids[start:start + FETCH_BATCH]
+        uid_set = ",".join(str(u) for u in block)
+        typ, data = conn.uid("SEARCH", None, "UID", uid_set)
+        if typ != "OK":
+            # Nicht nachprüfbar: lieber als "noch da" behandeln, damit kein
+            # Erfolg gemeldet wird, den niemand geprüft hat.
+            still.update(block)
+            continue
+        for raw in (data[0] or b"").split():
+            try:
+                still.add(int(raw))
+            except ValueError:
+                pass
+    return still
+
+
 def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
                   dry_run=True, progress=None):
     """Verschiebt Mails eines Ordners in den Papierkorb.
@@ -461,10 +514,22 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
     (Message-ID). Weicht etwas ab, wird die betroffene Mail übersprungen statt
     auf gut Glück gelöscht - eine falsch gelöschte Mail wäre nicht zu heilen.
 
-    Gibt {"moved", "skipped", "errors", "log"} zurück. Bei dry_run wird der
-    Ordner nur lesend geöffnet, es kann also gar nichts geschrieben werden.
+    NACH dem Verschieben wird nachgesehen, was tatsächlich verschwunden ist.
+    Nur das zählt als "moved". Denn ein Server, der auf MOVE mit OK antwortet,
+    hat damit noch nichts bewegt - und der Rückfallweg (kopieren + markieren)
+    lässt die Mail bewusst liegen.
+
+    Gibt {"moved", "flagged", "failed", "skipped", "errors", "method", "log"}
+    zurück:
+      moved   - nachweislich nicht mehr im Ursprungsordner
+      flagged - kopiert und als gelöscht markiert, liegt aber noch da
+      failed  - Server meldete Erfolg, die Mail ist trotzdem noch da
+
+    Bei dry_run wird der Ordner nur lesend geöffnet, es kann also gar nichts
+    geschrieben werden.
     """
-    result = {"moved": 0, "skipped": 0, "errors": 0, "log": []}
+    result = {"moved": 0, "flagged": 0, "failed": 0, "skipped": 0, "errors": 0,
+              "method": None, "log": []}
 
     def note(message):
         result["log"].append(message)
@@ -511,35 +576,91 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
     if not verified:
         return result
 
+    method = planned_method(conn)
+    result["method"] = method
+
     if dry_run:
         result["moved"] = len(verified)
         note(f"(Testlauf) WÜRDE {len(verified)} Mails aus '{folder}' in "
-             f"'{trash_folder}' verschieben.")
+             f"'{trash_folder}' {METHOD_DE[method]}.")
+        if method == "copy_flag":
+            note("(Testlauf) ACHTUNG: Dieser Server kann Mails nicht selbst "
+                 "verschieben. Die Mails blieben im Ordner liegen und wären nur "
+                 "als gelöscht markiert.")
         return result
 
     target = _quote(trash_folder)
+    attempted = []
     for start in range(0, len(verified), FETCH_BATCH):
         block = verified[start:start + FETCH_BATCH]
         uid_set = ",".join(str(u) for u in block)
         try:
-            moved = _move_block(conn, uid_set, target, note)
+            ok = _move_block(conn, uid_set, target, method)
         except Exception as e:  # noqa: BLE001
             result["errors"] += len(block)
             note(f"FEHLER beim Verschieben aus '{folder}': {e}")
             continue
-        if moved:
-            result["moved"] += len(block)
+        if ok:
+            attempted.extend(block)
         else:
             result["errors"] += len(block)
         if progress:
             progress(min(start + FETCH_BATCH, len(verified)), len(verified))
+
+    if not attempted:
+        return result
+
+    # Nachsehen statt glauben. Was noch im Ordner liegt, ist nicht weg.
+    try:
+        still_there = uids_still_present(conn, attempted)
+    except Exception as e:  # noqa: BLE001
+        result["failed"] += len(attempted)
+        note(f"FEHLER: Nachprüfung in '{folder}' fehlgeschlagen ({e}). Ob die "
+             f"{len(attempted)} Mails wirklich weg sind, ist damit ungeklärt.")
+        return result
+
+    gone = len(attempted) - len(still_there)
+    result["moved"] += gone
+
+    if method == "copy_flag":
+        # Hier ist Liegenbleiben der Normalfall, kein Fehler.
+        result["flagged"] += len(still_there)
+        note(f"ACHTUNG: Server kann weder MOVE noch UID EXPUNGE. {len(still_there)} "
+             f"Mails wurden nach '{trash_folder}' KOPIERT und in '{folder}' nur als "
+             "gelöscht markiert - sie liegen dort weiter und viele Mailprogramme "
+             "zeigen sie ganz normal an.")
+    elif still_there:
+        result["failed"] += len(still_there)
+        note(f"FEHLER: {len(still_there)} Mails liegen trotz erfolgreicher "
+             f"Server-Antwort noch in '{folder}'. Es wurde nichts gelöscht.")
     return result
 
 
-def _move_block(conn, uid_set, target, note):
-    """Ein Block Mails ins Ziel. Drei Wege, absteigend nach Sauberkeit."""
-    # 1. MOVE - der Normalfall bei iCloud, Gmail und allen aktuellen Servern.
+METHOD_DE = {
+    "move": "verschieben",
+    "copy_expunge": "kopieren und im Ordner entfernen",
+    "copy_flag": "kopieren und nur als gelöscht markieren",
+}
+
+
+def planned_method(conn):
+    """Welcher der drei Wege bei diesem Server benutzt wird - vorab bestimmbar,
+    damit schon der Testlauf sagen kann, was passieren wird."""
     if has_capability(conn, "MOVE"):
+        return "move"
+    if has_capability(conn, "UIDPLUS"):
+        return "copy_expunge"
+    return "copy_flag"
+
+
+def _move_block(conn, uid_set, target, method):
+    """Ein Block Mails ins Ziel. Drei Wege, absteigend nach Sauberkeit.
+
+    Gibt zurück, ob der Server die Befehle angenommen hat - NICHT, ob die Mails
+    weg sind. Das stellt erst die Nachprüfung in move_to_trash() fest.
+    """
+    # 1. MOVE - der Normalfall bei iCloud, Gmail und allen aktuellen Servern.
+    if method == "move":
         typ, _ = conn.uid("MOVE", uid_set, target)
         return typ == "OK"
 
@@ -551,7 +672,7 @@ def _move_block(conn, uid_set, target, note):
     if typ != "OK":
         return False
 
-    if has_capability(conn, "UIDPLUS"):
+    if method == "copy_expunge":
         conn.uid("EXPUNGE", uid_set)
         return True
 
@@ -559,6 +680,4 @@ def _move_block(conn, uid_set, target, note):
     #    würde jede als gelöscht markierte Mail im Ordner endgültig entfernen -
     #    auch solche, die der Nutzer selbst mal markiert hat. Die Kopie liegt
     #    im Papierkorb, das Original ist markiert; der Mail-Client räumt auf.
-    note("Hinweis: Server kann weder MOVE noch UID EXPUNGE - Mails wurden in den "
-         "Papierkorb kopiert und im Quellordner als gelöscht markiert.")
     return True
