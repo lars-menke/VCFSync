@@ -811,18 +811,48 @@ def clean(scan, dry_run=True, force=False, progress=None):
                 result["log"].extend(
                     f"{acc['account']} / {folder_name}: {line}" for line in part["log"])
                 if not dry_run:
+                    _mark_verified(acc, folder_name, part)
                     _forget_moved(scan, acc, folder_name, part)
         finally:
             mi.close(conn)
 
     if not dry_run:
-        save_decisions(record_decisions(reviewed))
-        result["log"].append(
-            f"Gelernt aus {len(reviewed)} geprüften Vorschlägen "
-            "(gelöscht wie behalten).")
+        # "delete" ist nur die Auswahl - ob die Mail wirklich weg ist, weiß
+        # allein die Nachprüfung in move_to_trash(). Nur bewusst behaltene
+        # Mails (delete=False) lernen ungeprüft, weil der Server sie nie
+        # angefasst hat; bewusst gelöschte nur, wenn verified_deleted gesetzt
+        # wurde. Sonst lernt das Tool aus Mails, die noch im Postfach liegen -
+        # genau der gemeldete Fehler.
+        to_learn = [m for m in reviewed
+                   if not m.get("delete") or m.get("verified_deleted")]
+        save_decisions(record_decisions(to_learn))
+        note = (f"Gelernt aus {len(to_learn)} geprüften Vorschlägen "
+                "(gelöscht wie behalten).")
+        open_count = len(reviewed) - len(to_learn)
+        if open_count:
+            note += (f" {open_count} Auswahlen sind noch offen (nicht bestätigt "
+                     "verschoben) und wurden nicht gelernt.")
+        result["log"].append(note)
         scan["executed"] = datetime.now(timezone.utc).isoformat()
         save_scan(scan)
     return result
+
+
+def _mark_verified(acc, folder_name, part):
+    """Nachweislich verschobene Mail-Dicts kennzeichnen - fürs Lernen unten.
+
+    Läuft vor _forget_moved(), das dieselben Mails gleich aus dem Scan nimmt;
+    die Markierung bleibt trotzdem gültig, weil reviewed() dieselben Objekte
+    referenziert.
+    """
+    gone = set(part.get("moved_uids") or ())
+    if not gone:
+        return
+    for folder in acc.get("folders", []):
+        if folder["folder"] == folder_name:
+            for mail in folder.get("mails", []):
+                if mail["uid"] in gone:
+                    mail["verified_deleted"] = True
 
 
 def _forget_moved(scan, acc, folder_name, part):
