@@ -609,6 +609,14 @@ BASE_CSS = """
   @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
   .card-head { display: flex; align-items: flex-start; gap: .75rem; margin-bottom: 1.1rem; }
+  .card-head.foldable { cursor: pointer; user-select: none; }
+  .card-fold {
+    margin-left: auto; flex: none; width: 22px; height: 22px; align-self: center;
+    color: var(--color-text-muted); transition: transform .2s var(--ease);
+  }
+  .card.collapsed .card-head { margin-bottom: 0; }
+  .card.collapsed .card-fold { transform: rotate(-90deg); }
+  .card.collapsed > *:not(.card-head) { display: none; }
   .card-icon {
     width: 34px; height: 34px; flex: none; border-radius: 10px;
     background: var(--color-primary-soft); color: var(--color-primary);
@@ -1326,8 +1334,8 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
 
   <div id="status" aria-live="polite"></div>
 
-  <div class="card">
-    <div class="card-head">
+  <div class="card collapsed" id="rulesCard">
+    <div class="card-head foldable" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCard(this);}">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/>
@@ -1338,6 +1346,7 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
         <p class="muted desc">Feste Anweisungen, die über dem Gelernten stehen.
            Am bequemsten legst du sie oben direkt an einem Absender an.</p>
       </div>
+      <svg class="card-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </div>
     <div class="form-grid">
       <label>Liste
@@ -1354,8 +1363,8 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
     <div id="rulesArea"></div>
   </div>
 
-  <div class="card">
-    <div class="card-head">
+  <div class="card collapsed" id="learnedCard">
+    <div class="card-head foldable" role="button" tabindex="0" aria-expanded="false" onclick="toggleCard(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCard(this);}">
       <div class="card-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/>
@@ -1366,6 +1375,7 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
         <p class="muted desc">Was das Tool aus deinen bisherigen Entscheidungen
            mitgenommen hat. Wird nach jedem echten Aufräumen ergänzt.</p>
       </div>
+      <svg class="card-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
     </div>
     <div id="learnedArea"><p class="muted">Noch nichts gelernt.</p></div>
   </div>
@@ -1512,7 +1522,9 @@ function renderFolderArea(accounts){
   area.innerHTML = accounts.map(a =>
     '<div data-account="' + esc(a.name) + '">' +
     '<p class="hl-title">' + esc(a.name) +
-    ' <button class="btn btn-secondary" onclick="loadFolders(\\'' + esc(a.name) + '\\')">Ordner laden</button></p>' +
+    ' <button class="btn btn-secondary" onclick="loadFolders(\\'' + esc(a.name) + '\\')">Ordner laden</button>' +
+    ' <button class="btn btn-secondary" onclick="setFolders(\\'' + esc(a.name) + '\\', true)">Alle</button>' +
+    ' <button class="btn btn-secondary" onclick="setFolders(\\'' + esc(a.name) + '\\', false)">Keine</button></p>' +
     '<div class="folder-list hidden" id="fl-' + esc(a.name) + '"></div></div>').join('');
 }
 async function loadFolders(name){
@@ -1525,6 +1537,17 @@ async function loadFolders(name){
     '<label><input type="checkbox" class="folder-cb" data-account="' + esc(name) + '"' +
     ' value="' + esc(f.name) + '"' + (f.skip ? '' : ' checked') + '> ' +
     esc(f.name) + (f.skip ? ' <span class="muted">(übersprungen)</span>' : '') + '</label>').join('');
+}
+function setFolders(name, checked){
+  const box = document.getElementById('fl-' + name);
+  if(!box || box.classList.contains('hidden')){ loadFolders(name).then(() => setFolders(name, checked)); return; }
+  box.querySelectorAll('.folder-cb').forEach(cb => { cb.checked = checked; });
+}
+
+/* ---------- Zuklappbare Karten (Eigene Regeln, Gelernt) ---------- */
+function toggleCard(head){
+  const collapsed = head.closest('.card').classList.toggle('collapsed');
+  head.setAttribute('aria-expanded', String(!collapsed));
 }
 
 /* ---------- Scan ---------- */
