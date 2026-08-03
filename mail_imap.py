@@ -241,6 +241,16 @@ _SIZE_RE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _FLAGS_RE = re.compile(rb"FLAGS\s+\(([^)]*)\)")
 _INTERNALDATE_RE = re.compile(rb'INTERNALDATE\s+"([^"]+)"')
 
+# Anhänge aus der BODYSTRUCTURE. Die Struktur ist beliebig tief verschachtelt;
+# sie vollständig zu zerlegen wäre aufwendig und fehleranfällig. Für "hat die
+# Mail einen Anhang und wie heißt er" reichen zwei gezielte Suchen:
+#   ("attachment" ("filename" "rechnung.pdf"))
+# Bewusst NICHT auf den "name"-Parameter des Content-Type geschaut - den tragen
+# auch eingebettete Bilder in HTML-Newslettern, die niemand als Anhang versteht.
+_ATTACHMENT_RE = re.compile(rb'\(\s*"attachment"', re.IGNORECASE)
+_FILENAME_RE = re.compile(rb'"filename"\s+"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
+MAX_ATTACHMENT_NAMES = 5
+
 
 def _decode_header_value(raw):
     """MIME-kodierte Kopfzeile (=?utf-8?B?...?=) in lesbaren Text."""
@@ -273,6 +283,50 @@ def _parse_date(msg, internaldate):
     return None
 
 
+def _balanced_group(data, start):
+    """Die geklammerte Gruppe ab data[start] == '(' einschließlich Klammern."""
+    depth = 0
+    for i in range(start, len(data)):
+        char = data[i:i + 1]
+        if char == b"(":
+            depth += 1
+        elif char == b")":
+            depth -= 1
+            if depth == 0:
+                return data[start:i + 1]
+    return data[start:]
+
+
+def _parse_attachments(prefix):
+    """(hat_anhang, [dateinamen]) aus dem BODYSTRUCTURE-Teil der Antwort.
+
+    Dateinamen werden ausdrücklich nur aus der Parameterliste der
+    "attachment"-Disposition gelesen. Würde man einfach jedes "filename" im
+    Datenstrom nehmen, zählte auch das eingebettete Logo eines HTML-Newsletters
+    als Anhang - das trägt eine "inline"-Disposition und meint etwas anderes.
+    """
+    names = []
+    has_attachment = False
+    for match in _ATTACHMENT_RE.finditer(prefix):
+        has_attachment = True
+        rest = prefix[match.end():]
+        opening = rest.find(b"(")
+        # Direkt hinter der Disposition steht entweder die Parameterliste oder
+        # NIL. Ein weit entferntes "(" gehört schon zu einem anderen Teil.
+        if opening == -1 or opening > 3:
+            continue
+        found = _FILENAME_RE.search(_balanced_group(rest, opening))
+        if not found:
+            continue
+        raw = found.group(1).replace(b'\\"', b'"').replace(b"\\\\", b"\\")
+        name = _decode_header_value(raw.decode("utf-8", errors="replace"))
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= MAX_ATTACHMENT_NAMES:
+            break
+    return has_attachment, names
+
+
 def _parse_fetch_item(prefix, header_bytes):
     """Ein FETCH-Ergebnis in ein Mail-Dict umwandeln."""
     uid_m = _UID_RE.search(prefix)
@@ -290,10 +344,13 @@ def _parse_fetch_item(prefix, header_bytes):
     address = (address or "").strip().lower()
 
     sent = _parse_date(msg, date_m.group(1) if date_m else None)
+    has_attachment, attachments = _parse_attachments(prefix)
     return {
         "uid": int(uid_m.group(1)),
         "flags": flags,
         "size": int(size_m.group(1)) if size_m else 0,
+        "has_attachment": has_attachment,
+        "attachments": attachments,
         "date": sent.isoformat() if sent else "",
         "from_name": _decode_header_value(display),
         "from": address,
@@ -350,7 +407,11 @@ def scan_folder(conn, folder, progress=None):
     if not total:
         return [], uidvalidity
 
-    query = f"(FLAGS RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})])"
+    # BODYSTRUCTURE steht bewusst VOR dem BODY.PEEK-Teil: dann landet es im
+    # Vorspann der Antwort und nicht hinter dem Literal, wo es schwerer
+    # zu greifen wäre.
+    query = ("(FLAGS RFC822.SIZE INTERNALDATE BODYSTRUCTURE "
+             f"BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})])")
     mails = []
     for start in range(0, total, FETCH_BATCH):
         block = uids[start:start + FETCH_BATCH]

@@ -7,3 +7,4 @@ __pycache__/
 client_secret*.json
 mail_accounts.json
 mail_decisions.json
+mail_rules.json

@@ -34,7 +34,11 @@ from icloud_contacts import _cell_is_delete
 
 ACCOUNTS_FILE = Path("mail_accounts.json")
 DECISIONS_FILE = Path("mail_decisions.json")
+RULES_FILE = Path("mail_rules.json")
 SCAN_FILE = Path("web_data") / "mail_scan.json"
+
+# Die vier von Hand pflegbaren Regellisten.
+RULE_LISTS = ("never_delete", "always_delete", "subject_never", "subject_delete")
 
 # Bekannte Anbieter - erspart das Nachschlagen der Serveradressen.
 PRESETS = {
@@ -46,9 +50,10 @@ PRESETS = {
 }
 
 DEFAULT_SETTINGS = {
-    "min_age_days": 30,     # jünger wird nie vorgeschlagen
-    "delete_at": 60,        # ab dieser Punktzahl vorangehakt
-    "unsure_at": 35,        # darunter gilt "behalten"
+    "min_age_days": 30,          # jünger wird gar nicht erst betrachtet
+    "precheck_min_age_days": 365,  # jünger wird nie vorangehakt, höchstens "unklar"
+    "delete_at": 60,             # ab dieser Punktzahl vorangehakt
+    "unsure_at": 35,             # darunter gilt "behalten"
 }
 
 # Obergrenze pro Lauf. Verhindert, dass ein Versehen (falscher Ordner, zu
@@ -196,6 +201,87 @@ def learned_summary(decisions=None, limit=40):
 
 
 # ---------------------------------------------------------------------------
+# Eigene Regeln
+# ---------------------------------------------------------------------------
+
+def load_rules():
+    """Von Hand gepflegte Regeln. Anders als der Lernspeicher sind das
+    ausdrückliche Anweisungen - sie schlagen deshalb das Gelernte."""
+    rules = {name: [] for name in RULE_LISTS}
+    if not RULES_FILE.exists():
+        return rules
+    try:
+        data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return rules
+    for name in RULE_LISTS:
+        rules[name] = [str(v).strip() for v in data.get(name, []) if str(v).strip()]
+    return rules
+
+
+def save_rules(rules):
+    RULES_FILE.write_text(
+        json.dumps({name: rules.get(name, []) for name in RULE_LISTS},
+                   indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def add_rule(list_name, value):
+    if list_name not in RULE_LISTS:
+        raise RuntimeError(f"Unbekannte Regelliste '{list_name}'.")
+    value = str(value).strip()
+    if not value:
+        raise RuntimeError("Leerer Regeleintrag.")
+    rules = load_rules()
+    lowered = [v.lower() for v in rules[list_name]]
+    if value.lower() not in lowered:
+        rules[list_name].append(value)
+        save_rules(rules)
+    return rules
+
+
+def remove_rule(list_name, value):
+    if list_name not in RULE_LISTS:
+        raise RuntimeError(f"Unbekannte Regelliste '{list_name}'.")
+    rules = load_rules()
+    rules[list_name] = [v for v in rules[list_name] if v.lower() != str(value).strip().lower()]
+    save_rules(rules)
+    return rules
+
+
+def _matches_sender(sender, patterns):
+    """Trifft die Absenderadresse eine der Regeln? Erlaubt die genaue Adresse
+    oder '*@domain.de' für alles von einer Domain."""
+    sender = (sender or "").strip().lower()
+    if not sender:
+        return None
+    domain = sender.rpartition("@")[2]
+    for pattern in patterns:
+        p = pattern.strip().lower()
+        if not p:
+            continue
+        if p.startswith("*@"):
+            if domain == p[2:]:
+                return pattern
+        elif p == sender:
+            return pattern
+    return None
+
+
+def _matches_subject(subject, patterns):
+    """Einfache Teiltext-Suche ohne Groß-/Kleinschreibung - bewusst keine
+    regulären Ausdrücke, damit sich die Regeln ohne Vorkenntnisse pflegen
+    lassen und nicht versehentlich zu viel treffen."""
+    text = (subject or "").lower()
+    if not text:
+        return None
+    for pattern in patterns:
+        p = pattern.strip().lower()
+        if p and p in text:
+            return pattern
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Bewertung
 # ---------------------------------------------------------------------------
 
@@ -259,17 +345,36 @@ def _learned_hint(mail, decisions):
     return 0, "", None
 
 
-def score_mail(mail, decisions=None, settings=None, now=None):
+def score_mail(mail, decisions=None, settings=None, now=None, rules=None):
     """Bewertet eine Mail: (punkte, empfehlung, begründungen).
 
     empfehlung ist "delete", "unsure" oder "keep". Nur "delete" wird in Excel
     und Web-Oberfläche vorangehakt - alles andere muss der Nutzer selbst
     ankreuzen.
+
+    Reihenfolge der Entscheidung (die erste greifende gewinnt):
+      1. eigene "nie löschen"-Regeln
+      2. harte Schutzregeln (markiert, beantwortet, Entwurf, zu neu)
+      3. eigene "immer löschen"-Regeln
+      4. Gelerntes aus früheren Entscheidungen
+      5. Punktebewertung
+    Ausdrückliche Anweisungen des Nutzers stehen also über dem Gelernten,
+    aber unter den Schutzregeln - eine markierte oder ganz frische Mail wird
+    auch dann nicht vorgeschlagen, wenn ihr Absender auf "immer löschen" steht.
     """
     decisions = decisions if decisions is not None else load_decisions()
+    rules = rules if rules is not None else load_rules()
     cfg = {**DEFAULT_SETTINGS, **(settings or {})}
     flags = [f.lower() for f in mail.get("flags", [])]
     reasons = []
+
+    # --- 1. Eigene "nie löschen"-Regeln ---
+    hit = _matches_sender(mail.get("from"), rules.get("never_delete", []))
+    if hit:
+        return 0, "keep", [f"eigene Regel: nie löschen ({hit})"]
+    hit = _matches_subject(mail.get("subject"), rules.get("subject_never", []))
+    if hit:
+        return 0, "keep", [f"eigene Betreffregel: nie löschen („{hit}“)"]
 
     # --- Harte Schutzregeln: nie vorschlagen, egal wie die Punkte stehen ---
     if "\\flagged" in flags:
@@ -285,6 +390,12 @@ def score_mail(mail, decisions=None, settings=None, now=None):
     if age < cfg["min_age_days"]:
         return 0, "keep", [f"erst {age} Tage alt - wird nie vorgeschlagen"]
 
+    # --- 3. Eigene "immer löschen"-Regeln (nach den Schutzregeln!) ---
+    hit = _matches_sender(mail.get("from"), rules.get("always_delete", []))
+    if hit:
+        return cfg["delete_at"], "delete", [f"eigene Regel: immer löschen ({hit})"]
+
+    # --- 4. Gelerntes ---
     learned_points, learned_reason, learned_verdict = _learned_hint(mail, decisions)
     if learned_verdict == "keep":
         return 0, "keep", [learned_reason + " - wird nie vorgeschlagen"]
@@ -309,8 +420,16 @@ def score_mail(mail, decisions=None, settings=None, now=None):
         score += 35
         reasons.append("Newsletter/Massenmail")
     if _is_automated_sender(mail):
-        score += 20
+        score += 30
         reasons.append("automatischer Absender")
+
+    hit = _matches_subject(mail.get("subject"), rules.get("subject_delete", []))
+    if hit:
+        # Starkes Signal, aber kein Machtwort: Betreffzeilen treffen gröber
+        # als Adressen. Zusammen mit dem Alter reicht es für einen Vorschlag,
+        # auf frischer Post feuert es dank Voranhak-Sperre nicht.
+        score += 35
+        reasons.append(f"eigene Betreffregel („{hit}“)")
 
     if "\\seen" in flags:
         score += 10
@@ -338,6 +457,17 @@ def score_mail(mail, decisions=None, settings=None, now=None):
         recommendation = "unsure"
     else:
         recommendation = "keep"
+
+    # Voranhak-Sperre: unterhalb dieser Grenze wird nie von selbst angehakt,
+    # höchstens "unklar" vorgeschlagen. Ohne diese Grenze addieren sich
+    # Einzelsignale zu einem Vorschlag, obwohl die Mail noch recht frisch ist -
+    # ein Newsletter von "newsletter@..." käme sonst schon nach wenigen Wochen
+    # über die Schwelle, nur weil "Newsletter" und "automatischer Absender"
+    # zusammenfallen.
+    if recommendation == "delete" and age < cfg["precheck_min_age_days"]:
+        recommendation = "unsure"
+        reasons.append(f"noch keine {cfg['precheck_min_age_days'] // 365 or 1} Jahr(e) alt "
+                       "- nicht von selbst angehakt")
     return score, recommendation, reasons
 
 
@@ -356,6 +486,7 @@ def scan_accounts(selection, settings=None, progress=None):
     """
     cfg = {**DEFAULT_SETTINGS, **(settings or {})}
     decisions = load_decisions()
+    rules = load_rules()   # einmal laden statt pro Mail
     scan = {"created": datetime.now(timezone.utc).isoformat(),
             "settings": cfg, "accounts": []}
 
@@ -377,7 +508,8 @@ def scan_accounts(selection, settings=None, progress=None):
 
                 mails, uidvalidity = mi.scan_folder(conn, folder, progress=on_block)
                 for mail in mails:
-                    score, recommendation, reasons = score_mail(mail, decisions, cfg)
+                    score, recommendation, reasons = score_mail(mail, decisions, cfg,
+                                                                rules=rules)
                     mail["score"] = score
                     mail["recommendation"] = recommendation
                     mail["reasons"] = reasons
@@ -416,13 +548,17 @@ def mail_key(account_name, folder_name, uid):
 
 
 def scan_summary(scan):
-    counts = {"total": 0, "delete": 0, "unsure": 0, "keep": 0, "bytes": 0}
+    counts = {"total": 0, "delete": 0, "unsure": 0, "keep": 0,
+              "bytes": 0, "selected": 0, "scanned_bytes": 0, "attachments": 0}
     for _acc, _folder, mail in iter_mails(scan):
         counts["total"] += 1
         counts[mail.get("recommendation", "keep")] += 1
+        counts["scanned_bytes"] += mail.get("size", 0)
+        if mail.get("has_attachment"):
+            counts["attachments"] += 1
         if mail.get("delete"):
-            counts["bytes"] += mail.get("size", 0)
-    counts["selected"] = sum(1 for _a, _f, m in iter_mails(scan) if m.get("delete"))
+            counts["selected"] += 1
+            counts["bytes"] += mail.get("size", 0)   # was die Auswahl freigibt
     return counts
 
 
@@ -433,9 +569,10 @@ def scan_summary(scan):
 EXCEL_COLUMNS = [
     "Konto", "Ordner", "UID", "Löschen", "Empfehlung", "Punkte", "Begründung",
     "Datum", "Alter (Tage)", "Von", "Absender", "Domain", "Betreff",
-    "Größe (KB)", "Gelesen", "Markiert", "Beantwortet",
+    "Größe (KB)", "Anhang", "Anhangnamen", "Gelesen", "Markiert", "Beantwortet",
 ]
-_EXCEL_WIDTHS = [16, 22, 10, 9, 12, 8, 46, 12, 12, 26, 34, 22, 52, 12, 9, 9, 12]
+_EXCEL_WIDTHS = [16, 22, 10, 9, 12, 8, 46, 12, 12, 26, 34, 22, 52,
+                 12, 9, 32, 9, 9, 12]
 
 
 def scan_to_excel(scan, path):
@@ -468,6 +605,8 @@ def scan_to_excel(scan, path):
             (mail.get("date") or "")[:10], age if age is not None else "",
             mail.get("from_name", ""), mail.get("from", ""), mail.get("domain", ""),
             mail.get("subject", ""), round(mail.get("size", 0) / 1024),
+            "ja" if mail.get("has_attachment") else "",
+            ", ".join(mail.get("attachments", [])),
             "ja" if "\\seen" in flags else "",
             "ja" if "\\flagged" in flags else "",
             "ja" if "\\answered" in flags else "",
@@ -743,6 +882,46 @@ def cmd_clean(args):
         print("  python mail_cleanup.py clean --execute")
 
 
+_RULE_LABELS = {
+    "never_delete": "nie löschen (Absender)",
+    "always_delete": "immer löschen (Absender)",
+    "subject_never": "nie löschen (Betreff enthält)",
+    "subject_delete": "eher löschen (Betreff enthält)",
+}
+
+
+def cmd_regeln(args):
+    changes = [("never_delete", args.nie), ("always_delete", args.immer),
+               ("subject_never", args.betreff_nie), ("subject_delete", args.betreff_immer)]
+    touched = False
+    for list_name, values in changes:
+        for value in values or []:
+            add_rule(list_name, value)
+            print(f"Ergänzt in '{_RULE_LABELS[list_name]}': {value}")
+            touched = True
+    for value in args.remove or []:
+        for list_name in RULE_LISTS:
+            remove_rule(list_name, value)
+        print(f"Entfernt (aus allen Listen): {value}")
+        touched = True
+    if touched:
+        print()
+
+    rules = load_rules()
+    if not any(rules[name] for name in RULE_LISTS):
+        print("Noch keine eigenen Regeln. Beispiele:")
+        print("  python mail_cleanup.py regeln --immer 'newsletter@shop.de'")
+        print("  python mail_cleanup.py regeln --immer '*@werbung.de'")
+        print("  python mail_cleanup.py regeln --nie 'chef@firma.de'")
+        print("  python mail_cleanup.py regeln --betreff-immer 'Ihre Bestellung'")
+        return
+    for list_name in RULE_LISTS:
+        if rules[list_name]:
+            print(f"{_RULE_LABELS[list_name]}:")
+            for value in rules[list_name]:
+                print(f"  - {value}")
+
+
 def cmd_gelernt(args):
     if args.reset:
         if DECISIONS_FILE.exists():
@@ -791,12 +970,25 @@ def main():
     clean_p.add_argument("--force", action="store_true",
                          help=f"Sicherheitsgrenze von {MAX_PER_RUN} Mails pro Lauf aufheben")
 
+    regeln = sub.add_parser("regeln", help="Eigene Regeln anzeigen und pflegen")
+    regeln.add_argument("--nie", action="append", metavar="ABSENDER",
+                        help="Nie löschen, z.B. 'chef@firma.de' oder '*@firma.de'")
+    regeln.add_argument("--immer", action="append", metavar="ABSENDER",
+                        help="Immer vorschlagen, z.B. 'news@shop.de' oder '*@werbung.de'")
+    regeln.add_argument("--betreff-nie", action="append", metavar="TEXT",
+                        dest="betreff_nie", help="Betreff enthält … -> nie löschen")
+    regeln.add_argument("--betreff-immer", action="append", metavar="TEXT",
+                        dest="betreff_immer", help="Betreff enthält … -> eher löschen")
+    regeln.add_argument("--remove", action="append", metavar="WERT",
+                        help="Eintrag aus allen Listen entfernen")
+
     gelernt = sub.add_parser("gelernt", help="Zeigen, was aus deinen Entscheidungen gelernt wurde")
     gelernt.add_argument("--reset", action="store_true", help="Lernspeicher leeren")
 
     args = parser.parse_args()
     handlers = {"konten": cmd_konten, "scan": cmd_scan, "to-excel": cmd_to_excel,
-                "from-excel": cmd_from_excel, "clean": cmd_clean, "gelernt": cmd_gelernt}
+                "from-excel": cmd_from_excel, "clean": cmd_clean, "regeln": cmd_regeln,
+                "gelernt": cmd_gelernt}
     try:
         handlers[args.cmd](args)
     except RuntimeError as e:

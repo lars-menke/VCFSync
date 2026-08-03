@@ -371,8 +371,73 @@ nicht erst durchsucht.
 Ansonsten zählen: Alter, Newsletter- und Massenmail-Kennzeichen
 (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`), automatische Absender
 (`noreply@`, `notifications@` …), ob die Mail gelesen wurde, und die Größe.
-Vorangehakt wird nur, was deutlich genug zusammenkommt — alles Grenzwertige
-erscheint als „unklar" und muss selbst angekreuzt werden.
+
+Zusätzlich gilt eine **Voranhak-Sperre**: Was jünger als ein Jahr ist, wird von
+der Punktebewertung nie von selbst angehakt — höchstens als „unklar" gezeigt.
+Sonst summieren sich Einzelsignale zu einem Vorschlag, obwohl die Mail noch
+recht frisch ist. Ausgenommen sind ausdrückliche Anweisungen: eigene Regeln und
+Gelerntes wirken schon ab dem Mindestalter von 30 Tagen.
+
+So urteilt das Tool damit:
+
+| Beispiel | Urteil |
+|---|---|
+| Newsletter, 1 Jahr alt oder älter | **vorangehakt** |
+| Automatischer Absender, ab 2 Jahren | **vorangehakt** |
+| Newsletter, 40 Tage alt | unklar |
+| Automatischer Absender, 18 Monate | unklar |
+| Persönliche Post, egal wie alt | nie vorangehakt |
+
+Alles Grenzwertige erscheint als „unklar" und muss selbst angekreuzt werden.
+
+### Anhänge und Speicherplatz
+
+Beim Durchsuchen wird miterfasst, ob eine Mail einen **Anhang** hat und wie er
+heißt. Eingebettete Bilder aus HTML-Newslettern zählen dabei bewusst nicht als
+Anhang — die tragen zwar einen Dateinamen, sind aber keine Anlage im
+gemeinten Sinn.
+
+Anhänge fließen **nicht** in die Bewertung ein: ob eine Mail wertvoll ist, sagt
+ein Anhang nicht — die alte Rechnung genauso wenig wie die Urlaubsfotos. Sie
+werden nur sichtbar gemacht, damit du selbst entscheiden kannst.
+
+In der Web-Oberfläche lässt sich die Liste umschalten zwischen *nach Absender*,
+*nach Größe* und *nur mit Anhang*; eine Kachel zeigt laufend, wie viel die
+aktuelle Auswahl freigibt. In Excel gibt es die Spalten `Anhang` und
+`Anhangnamen`, sortieren geht dort über den Autofilter.
+
+### Eigene Regeln
+
+Neben dem Gelernten lassen sich feste Regeln pflegen. Sie stehen **über** dem
+Gelernten, aber **unter** den Schutzregeln — eine markierte oder ganz frische
+Mail wird auch dann nicht vorgeschlagen, wenn ihr Absender auf „immer löschen"
+steht.
+
+| Liste | Wirkung |
+|---|---|
+| nie löschen (Absender) | wird nie vorgeschlagen |
+| immer löschen (Absender) | wird vorgeschlagen |
+| nie löschen (Betreff enthält) | wird nie vorgeschlagen |
+| eher löschen (Betreff enthält) | starkes Signal, entscheidet aber nicht allein |
+
+Bei Absendern ist neben der genauen Adresse auch `*@domain.de` erlaubt.
+Betreffregeln sind einfache Teiltextsuchen ohne Groß-/Kleinschreibung — bewusst
+keine regulären Ausdrücke.
+
+Am bequemsten legst du Regeln direkt beim Durchsehen an: neben jedem Absender
+stehen in der Ergebnisliste zwei kleine Knöpfe **immer** und **nie**. Sonst:
+
+```bash
+python mail_cleanup.py regeln                              # anzeigen
+python mail_cleanup.py regeln --immer '*@werbung.de'
+python mail_cleanup.py regeln --nie 'chef@firma.de'
+python mail_cleanup.py regeln --betreff-immer 'Ihre Bestellung'
+python mail_cleanup.py regeln --betreff-nie 'Rechnung'
+python mail_cleanup.py regeln --remove 'chef@firma.de'
+```
+
+Gespeichert wird das in `mail_rules.json` (nicht im Git). Nach einer Änderung
+muss neu durchsucht werden, damit sie greift.
 
 ### Das Tool lernt mit
 
@@ -423,6 +488,7 @@ Verschieben in den Papierkorb entfernt die Mail bei Gmail aus allen Labels.
 - Die Google-OAuth-Client-JSON (`client_secret*.json`) und der gespeicherte
   Google-Token (`.google_token.json`) sind ebenfalls via `.gitignore`
   ausgeschlossen — niemals committen
-- Die E-Mail-Zugangsdaten (`mail_accounts.json`) und der Lernspeicher
-  (`mail_decisions.json`) enthalten Passwörter bzw. Absenderadressen und sind
-  ebenfalls via `.gitignore` ausgeschlossen — niemals committen
+- Die E-Mail-Zugangsdaten (`mail_accounts.json`), der Lernspeicher
+  (`mail_decisions.json`) und die eigenen Regeln (`mail_rules.json`) enthalten
+  Passwörter bzw. Absenderadressen und sind ebenfalls via `.gitignore`
+  ausgeschlossen — niemals committen

@@ -403,6 +403,8 @@ def api_mail_result():
             "size": mail.get("size", 0), "score": mail.get("score", 0),
             "recommendation": mail.get("recommendation"),
             "reasons": mail.get("reasons", []), "delete": bool(mail.get("delete")),
+            "attachment": bool(mail.get("has_attachment")),
+            "attachments": mail.get("attachments", []),
         })
         group["selected"] += 1 if mail.get("delete") else 0
         group["bytes"] += mail.get("size", 0)
@@ -410,6 +412,7 @@ def api_mail_result():
     ordered = sorted(groups.values(), key=lambda g: (-len(g["mails"]), g["sender"]))
     for group in ordered:
         group["mails"].sort(key=lambda m: m["date"])
+        group["attachments"] = sum(1 for m in group["mails"] if m["attachment"])
     return jsonify({"groups": ordered, "summary": mc.scan_summary(scan),
                     "executed": scan.get("executed")})
 
@@ -458,6 +461,32 @@ def api_mail_clean():
 @app.route("/api/mail/learned")
 def api_mail_learned():
     return jsonify({"rows": mc.learned_summary()})
+
+
+@app.route("/api/mail/rules", methods=["GET", "POST", "DELETE"])
+def api_mail_rules():
+    """Von Hand gepflegte Regeln. Nach einer Änderung muss neu bewertet werden -
+    das meldet die Antwort über 'rescan', damit die Oberfläche darauf hinweisen
+    kann, statt stillschweigend veraltete Vorschläge stehen zu lassen."""
+    try:
+        if request.method == "GET":
+            return jsonify({"rules": mc.load_rules(), "lists": list(mc.RULE_LISTS)})
+
+        data = request.json or {}
+        list_name, value = data.get("list", ""), data.get("value", "")
+        if not value:
+            return jsonify({"error": "Kein Wert angegeben."}), 400
+
+        if request.method == "DELETE":
+            for name in mc.RULE_LISTS:
+                mc.remove_rule(name, value)
+        else:
+            if list_name not in mc.RULE_LISTS:
+                return jsonify({"error": "Unbekannte Regelliste."}), 400
+            mc.add_rule(list_name, value)
+        return jsonify({"rules": mc.load_rules(), "rescan": True})
+    except Exception as e:  # noqa: BLE001
+        return _mail_error(e)
 
 
 BASE_CSS = """
@@ -758,6 +787,8 @@ BASE_CSS = """
   }
   .group-head .g-sender { font-weight: 600; font-family: var(--font-mono); font-size: .85rem; }
   .group-head .g-meta { color: var(--color-text-muted); font-size: .82rem; margin-left: auto; }
+  .group-head .g-rules { display: flex; gap: .25rem; }
+  .group-head .g-rules .btn { padding: .18rem .5rem; font-size: .75rem; }
   .group-mails { display: none; padding: .3rem .8rem .6rem; }
   .group.open .group-mails { display: block; }
   .mail-row {
@@ -1228,6 +1259,18 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
       <input type="file" id="mailFile" accept=".xlsx" onchange="uploadExcel()">
     </div>
     <p id="uploadInfo" class="muted"></p>
+    <fieldset class="target-group" id="sortBox" style="display:none">
+      <legend class="muted">Sortierung</legend>
+      <label class="target-option">
+        <input type="radio" name="sortMode" value="count" checked onchange="renderGroups()"> nach Absender
+      </label>
+      <label class="target-option">
+        <input type="radio" name="sortMode" value="size" onchange="renderGroups()"> nach Größe
+      </label>
+      <label class="target-option">
+        <input type="radio" name="sortMode" value="attachment" onchange="renderGroups()"> nur mit Anhang
+      </label>
+    </fieldset>
     <div id="resultArea"><p class="muted">Noch kein Scan vorhanden.</p></div>
   </div>
 
@@ -1254,6 +1297,34 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
   </div>
 
   <div id="status" aria-live="polite"></div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 6h16M4 12h16M4 18h10"/><circle cx="18" cy="18" r="3"/>
+        </svg>
+      </div>
+      <div>
+        <h2>Eigene Regeln</h2>
+        <p class="muted desc">Feste Anweisungen, die über dem Gelernten stehen.
+           Am bequemsten legst du sie oben direkt an einem Absender an.</p>
+      </div>
+    </div>
+    <div class="form-grid">
+      <label>Liste
+        <select id="ruleList">
+          <option value="never_delete">nie löschen (Absender)</option>
+          <option value="always_delete">immer löschen (Absender)</option>
+          <option value="subject_never">nie löschen (Betreff enthält)</option>
+          <option value="subject_delete">eher löschen (Betreff enthält)</option>
+        </select>
+      </label>
+      <label>Wert<input id="ruleValue" placeholder="news@shop.de oder *@werbung.de"></label>
+    </div>
+    <button class="btn btn-secondary" onclick="addRuleFromForm()">Regel hinzufügen</button>
+    <div id="rulesArea"></div>
+  </div>
 
   <div class="card">
     <div class="card-head">
@@ -1401,52 +1472,104 @@ async function startScan(){
 }
 
 /* ---------- Ergebnis ---------- */
+let groupData = [];
+let summaryData = null;
+
 async function loadResult(){
   const j = await jget('/api/mail/result');
   const area = document.getElementById('resultArea');
-  if(j.error){ area.innerHTML = '<p class="muted">' + esc(j.error) + '</p>'; return; }
-
+  if(j.error){
+    area.innerHTML = '<p class="muted">' + esc(j.error) + '</p>';
+    document.getElementById('sortBox').style.display = 'none';
+    return;
+  }
+  groupData = j.groups;
+  summaryData = j.summary;
   selected = new Set();
-  j.groups.forEach(g => g.mails.forEach(m => { if(m.delete) selected.add(m.key); }));
+  groupData.forEach(g => g.mails.forEach(m => { if(m.delete) selected.add(m.key); }));
+  document.getElementById('sortBox').style.display = groupData.length ? '' : 'none';
+  renderGroups();
+}
 
-  const s = j.summary;
+function sortMode(){
+  const el = document.querySelector('input[name="sortMode"]:checked');
+  return el ? el.value : 'count';
+}
+
+function selectedBytes(){
+  let total = 0;
+  groupData.forEach(g => g.mails.forEach(m => { if(selected.has(m.key)) total += m.size; }));
+  return total;
+}
+
+function renderGroups(){
+  const area = document.getElementById('resultArea');
+  if(!summaryData) return;
+  const s = summaryData;
+
   let html = '<div class="stat-grid">' +
     '<div class="stat-tile"><div class="stat-value">' + s.total + '</div><div class="stat-label">Geprüft</div></div>' +
     '<div class="stat-tile"><div class="stat-value">' + s.delete + '</div><div class="stat-label">Vorgeschlagen</div></div>' +
-    '<div class="stat-tile"><div class="stat-value">' + s.unsure + '</div><div class="stat-label">Unklar</div></div>' +
     '<div class="stat-tile"><div class="stat-value" id="selCount">' + selected.size + '</div><div class="stat-label">Ausgewählt</div></div>' +
+    '<div class="stat-tile"><div class="stat-value" id="selBytes">' + kb(selectedBytes()) + '</div><div class="stat-label">Wird frei</div></div>' +
     '</div>';
 
-  if(!j.groups.length){
-    area.innerHTML = html + '<p class="muted">Nichts zum Aufräumen gefunden.</p>';
+  let groups = groupData.slice();
+  const mode = sortMode();
+  if(mode === 'size'){
+    groups.sort((a, b) => b.bytes - a.bytes);
+  } else if(mode === 'attachment'){
+    groups = groups.filter(g => g.attachments > 0);
+    groups.sort((a, b) => b.bytes - a.bytes);
+  } else {
+    groups.sort((a, b) => b.mails.length - a.mails.length || a.sender.localeCompare(b.sender));
+  }
+
+  if(!groups.length){
+    area.innerHTML = html + '<p class="muted">' +
+      (mode === 'attachment' ? 'Keine Vorschläge mit Anhang.' : 'Nichts zum Aufräumen gefunden.') +
+      '</p>';
     updateCleanButton();
     return;
   }
 
-  html += j.groups.map((g, gi) =>
-    '<div class="group" id="g' + gi + '">' +
+  html += groups.map((g) => {
+    const gi = groupData.indexOf(g);
+    const mails = (mode === 'attachment') ? g.mails.filter(m => m.attachment) : g.mails;
+    return '<div class="group" id="g' + gi + '">' +
       '<div class="group-head" onclick="toggleGroup(' + gi + ', event)">' +
         '<input type="checkbox" onclick="toggleAll(' + gi + ', this, event)"' +
-          (g.mails.every(m => m.delete) ? ' checked' : '') + '>' +
+          (mails.every(m => selected.has(m.key)) ? ' checked' : '') + '>' +
         '<span class="g-sender">' + esc(g.sender) + '</span>' +
         (g.name ? '<span class="muted">' + esc(g.name) + '</span>' : '') +
-        '<span class="g-meta">' + g.mails.length + (g.mails.length === 1 ? ' Mail · ' : ' Mails · ') + kb(g.bytes) + '</span>' +
+        '<span class="g-meta">' + mails.length + (mails.length === 1 ? ' Mail · ' : ' Mails · ') +
+          kb(g.bytes) + (g.attachments ? ' · ' + g.attachments + '× Anhang' : '') + '</span>' +
+        '<span class="g-rules">' +
+          '<button class="btn btn-secondary" title="Diesen Absender künftig immer vorschlagen"' +
+            ' onclick="ruleForSender(\\'' + esc(g.sender) + '\\', \\'always_delete\\', event)">immer</button>' +
+          '<button class="btn btn-secondary" title="Diesen Absender künftig nie vorschlagen"' +
+            ' onclick="ruleForSender(\\'' + esc(g.sender) + '\\', \\'never_delete\\', event)">nie</button>' +
+        '</span>' +
       '</div>' +
-      '<div class="group-mails">' + g.mails.map(m =>
+      '<div class="group-mails">' + mails.map(m =>
         '<label class="mail-row">' +
           '<input type="checkbox" class="mail-cb" data-group="' + gi + '" value="' + esc(m.key) + '"' +
-            (m.delete ? ' checked' : '') + ' onchange="onMailToggle(this)">' +
+            (selected.has(m.key) ? ' checked' : '') + ' onchange="onMailToggle(this)">' +
           '<span class="m-body">' +
-            '<span class="m-subject">' + esc(m.subject || '(kein Betreff)') + '</span>' +
+            '<span class="m-subject">' +
+              (m.attachment ? '<span title="' + esc(m.attachments.join(', ')) + '">📎 </span>' : '') +
+              esc(m.subject || '(kein Betreff)') + '</span>' +
             '<span class="m-why"><span class="pill pill-' + m.recommendation + '">' +
               (m.recommendation === 'delete' ? 'löschen'
                 : (m.recommendation === 'unsure' ? 'unklar' : 'selbst gewählt')) + '</span> ' +
-              esc(m.reasons.join(', ')) + ' · ' + esc(m.folder) + '</span>' +
+              esc(m.reasons.join(', ')) + ' · ' + esc(m.folder) +
+              (m.attachments.length ? ' · ' + esc(m.attachments.join(', ')) : '') + '</span>' +
           '</span>' +
           '<span class="m-date">' + esc(m.date) + '<br>' + kb(m.size) + '</span>' +
         '</label>').join('') +
       '</div>' +
-    '</div>').join('');
+    '</div>';
+  }).join('');
 
   area.innerHTML = html;
   updateCleanButton();
@@ -1470,6 +1593,8 @@ function onMailToggle(cb){
 function refreshCount(){
   const el = document.getElementById('selCount');
   if(el) el.textContent = selected.size;
+  const b = document.getElementById('selBytes');
+  if(b) b.textContent = kb(selectedBytes());
   updateCleanButton();
 }
 function updateCleanButton(){
@@ -1563,6 +1688,60 @@ async function refresh(){
   }
 }
 
+/* ---------- Eigene Regeln ---------- */
+const RULE_LABELS = {
+  never_delete: 'nie löschen (Absender)',
+  always_delete: 'immer löschen (Absender)',
+  subject_never: 'nie löschen (Betreff enthält)',
+  subject_delete: 'eher löschen (Betreff enthält)'
+};
+
+async function loadRules(){
+  const j = await jget('/api/mail/rules');
+  renderRules(j.rules);
+}
+function renderRules(rules){
+  const area = document.getElementById('rulesArea');
+  const names = Object.keys(RULE_LABELS).filter(n => (rules[n] || []).length);
+  if(!names.length){
+    area.innerHTML = '<p class="muted">Noch keine eigenen Regeln.</p>';
+    return;
+  }
+  area.innerHTML = names.map(n =>
+    '<p class="hl-title">' + RULE_LABELS[n] + '</p>' +
+    rules[n].map(v =>
+      '<div class="acc-row"><span class="acc-name">' + esc(v) + '</span>' +
+      '<span class="acc-actions"><button class="btn btn-secondary" onclick="removeRule(\\'' +
+      esc(v).replace(/'/g, "\\\\'") + '\\')">Entfernen</button></span></div>').join('')
+  ).join('');
+}
+async function addRuleFromForm(){
+  const value = document.getElementById('ruleValue').value.trim();
+  if(!value){ alert('Bitte einen Wert eingeben.'); return; }
+  await saveRule(document.getElementById('ruleList').value, value);
+  document.getElementById('ruleValue').value = '';
+}
+async function saveRule(list, value){
+  const res = await jpost('/api/mail/rules', {list: list, value: value});
+  if(!res.ok){ alert(res.data.error); return; }
+  renderRules(res.data.rules);
+  noteRescan();
+}
+async function removeRule(value){
+  const res = await jpost('/api/mail/rules', {value: value}, 'DELETE');
+  if(!res.ok){ alert(res.data.error); return; }
+  renderRules(res.data.rules);
+  noteRescan();
+}
+function noteRescan(){
+  const info = document.getElementById('uploadInfo');
+  info.textContent = 'Regel geändert — bitte noch einmal durchsuchen, damit sie wirkt.';
+}
+function ruleForSender(sender, list, ev){
+  ev.stopPropagation();
+  saveRule(list, sender);
+}
+
 /* ---------- Gelernt ---------- */
 async function loadLearned(){
   const j = await jget('/api/mail/learned');
@@ -1578,6 +1757,7 @@ async function loadLearned(){
 
 loadAccounts();
 loadResult();
+loadRules();
 loadLearned();
 refresh();
 </script>
