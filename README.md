@@ -301,9 +301,11 @@ in denen jahrelang alles nur einsortiert und nie gelöscht wurde.
 jeweiligen Kontos und lassen sich dort zurückholen. Der Testlauf ist überall
 der Standard, ein echter Lauf braucht eine ausdrückliche Bestätigung.
 
-Es werden ausschließlich **Kopfzeilen** gelesen (Absender, Betreff, Datum,
-Newsletter-Kennzeichen), niemals Mail-Texte. Alles läuft lokal; es wird nichts
-an einen Dienst gesendet.
+Bewertet wird fast ausschließlich anhand von **Kopfzeilen** (Absender, Betreff,
+Datum, Newsletter-Kennzeichen). Eine eng begrenzte Ausnahme: Für die
+automatische Rechnungs-/Behördenerkennung wird bei einer kleinen Minderheit von
+Mails ein kurzer Textausschnitt gegengelesen (Details unten). Alles läuft
+lokal; es wird nichts an einen Dienst gesendet.
 
 ### Postfächer einrichten
 
@@ -456,6 +458,33 @@ python mail_cleanup.py regeln --remove 'chef@firma.de'
 
 Gespeichert wird das in `mail_rules.json` (nicht im Git). Nach einer Änderung
 muss neu durchsucht werden, damit sie greift.
+
+### Mail-Typ-Erkennung: Rechnungen und Bank-/Behördenpost
+
+Zwei Typen werden automatisch erkannt und **nie von selbst angehakt** — egal
+wie eindeutig Alter, Absender oder Punkte sonst für „löschen" sprächen:
+
+| Typ | Woran erkannt |
+|---|---|
+| Rechnung / Bestellung | Betreff enthält z.B. „Rechnung", „Bestellbestätigung", „Quittung", „Lieferschein" |
+| Bank / Versicherung / Behörde | Absender-Domain (z.B. `*sparkasse*`, `*versicherung*`, `finanzamt.*`) oder Betreff (z.B. „Kontoauszug", „Steuerbescheid", „Mahnung") |
+
+Das ist genauso stark wie die Voranhak-Sperre: eine erkannte Mail wird
+höchstens „unklar", nie automatisch „löschen". Zu erkennen ist das am Grund
+„… erkannt — wird deshalb nicht von selbst angehakt" in der Begründung und an
+der Spalte `Typ` in Excel.
+
+**Eng begrenzte Ausnahme vom Kopfzeilen-Prinzip:** Verrät der Betreff nichts,
+liest das Tool für Mails, die sonst automatisch angehakt würden, einen kurzen
+Textausschnitt (die ersten 3 KB) gegen — nur für diese Minderheit, nicht
+pauschal für jede Mail, und weiterhin nur lesend (`BODY.PEEK`). Gesucht wird
+nach Stichworten wie „IBAN", „Rechnungsnummer" oder „Kundennummer". Das ist
+eine einfache Stichwortsuche, kein Parser: verschlüsselte oder rein
+Base64-kodierte Mails liefern keinen Treffer.
+
+Eigene Regeln (`nie`/`immer löschen`) und eindeutig Gelerntes stehen **über**
+der Typ-Erkennung — wer eine Adresse ausdrücklich auf „immer löschen" gesetzt
+hat, weiß das besser als eine Stichwortsuche.
 
 ### Das Tool lernt mit
 

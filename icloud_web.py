@@ -422,6 +422,7 @@ def api_mail_result():
             "reasons": mail.get("reasons", []), "delete": bool(mail.get("delete")),
             "attachment": bool(mail.get("has_attachment")),
             "attachments": mail.get("attachments", []),
+            "mail_type": mail.get("mail_type"),
         })
         group["selected"] += 1 if mail.get("delete") else 0
         group["bytes"] += mail.get("size", 0)
@@ -844,6 +845,8 @@ BASE_CSS = """
   .pill-delete { background: #fee2e2; color: #b91c1c; }
   .pill-unsure { background: #fef3c7; color: #92400e; }
   .pill-keep { background: var(--color-primary-soft); color: var(--color-primary); }
+  .pill-type { background: var(--color-surface-2); color: var(--color-text-muted);
+               border: 1px solid var(--color-border); }
   @media (prefers-color-scheme: dark) {
     .pill-delete { background: #7f1d1d; color: #fecaca; }
     .pill-unsure { background: #78350f; color: #fde68a; }
@@ -1697,6 +1700,7 @@ function renderGroups(){
             '<span class="m-why"><span class="pill pill-' + m.recommendation + '">' +
               (m.recommendation === 'delete' ? 'löschen'
                 : (m.recommendation === 'unsure' ? 'unklar' : 'selbst gewählt')) + '</span> ' +
+              (m.mail_type ? '<span class="pill pill-type">' + esc(MAIL_TYPE_LABELS[m.mail_type] || m.mail_type) + '</span> ' : '') +
               esc(m.reasons.join(', ')) + ' · ' + esc(m.folder) +
               (m.attachments.length ? ' · ' + esc(m.attachments.join(', ')) : '') + '</span>' +
           '</span>' +
@@ -1845,6 +1849,11 @@ async function refresh(){
     if(!r.dry_run){ loadResult(); loadLearned(); }
   }
 }
+
+const MAIL_TYPE_LABELS = {
+  invoice: '📄 Rechnung/Bestellung',
+  official: '🏦 Bank/Versicherung/Behörde',
+};
 
 /* ---------- Eigene Regeln ---------- */
 const RULE_LABELS = {

@@ -17,9 +17,12 @@ ausdrücklich behandelt werden:
    Hier wird durchgängig mit UID-Befehlen gearbeitet, und vor dem Verschieben
    werden UIDVALIDITY und Message-ID gegen den Scan-Stand geprüft.
 
-Gelesen werden ausschließlich Kopfzeilen (BODY.PEEK[HEADER.FIELDS ...]),
-niemals Mail-Texte. Das reicht für die Bewertung, ist deutlich schneller und
-lässt den Gelesen-Status unangetastet (PEEK).
+Gelesen werden beim Durchsuchen selbst ausschließlich Kopfzeilen
+(BODY.PEEK[HEADER.FIELDS ...]) - das reicht für die Bewertung, ist deutlich
+schneller und lässt den Gelesen-Status unangetastet (PEEK). fetch_body_snippets()
+ist die einzige Ausnahme: ein kurzer Textausschnitt für die Handvoll Mails, bei
+denen mail_cleanup.py aus den Kopfzeilen keinen Mail-Typ (Rechnung, Bank/
+Behörde) erkennen konnte, ebenfalls per PEEK und ohne Nebenwirkungen.
 """
 
 import base64
@@ -481,6 +484,44 @@ def fetch_message_ids(conn, uids):
                     continue
                 msg = BytesParser().parsebytes(item[1] or b"")
                 found[int(uid_m.group(1))] = _header_str(msg.get("Message-ID")).strip()
+    return found
+
+
+def fetch_body_snippets(conn, folder, uids, max_bytes=3000):
+    """Ersten Teil des Mailtexts zu bestimmten UIDs lesen - rein lesend
+    (BODY.PEEK, markiert nichts als gelesen), nur so viele Bytes wie für eine
+    Stichwortsuche nötig.
+
+    Bewusst kein MIME-Parser: quoted-printable/base64-kodierte Anteile werden
+    nicht aufgelöst, das reicht für eine einfache Stichwortsuche in
+    Klartext-Anteilen. Rein Base64-kodierte oder verschlüsselte Mails liefern
+    entsprechend keine Treffer - eine bewusste Grenze, kein Fehler.
+
+    Aufrufer muss dafür sorgen, dass der Ordner zur Übergabe passt; hier wird
+    er selbst noch einmal schreibgeschützt geöffnet, unabhängig vom Zustand
+    der Verbindung.
+    """
+    uids = list(uids)
+    if not uids:
+        return {}
+    typ, _ = conn.select(_quote(folder), readonly=True)
+    if typ != "OK":
+        raise RuntimeError(f"Ordner '{folder}' konnte nicht geöffnet werden.")
+
+    found = {}
+    query = f"(BODY.PEEK[TEXT]<0.{int(max_bytes)}>)"
+    for start in range(0, len(uids), FETCH_BATCH):
+        block = uids[start:start + FETCH_BATCH]
+        uid_set = ",".join(str(u) for u in block)
+        typ, data = conn.uid("FETCH", uid_set, query)
+        if typ != "OK":
+            raise RuntimeError(f"Textausschnitt aus '{folder}' konnte nicht gelesen werden.")
+        for item in data or []:
+            if isinstance(item, tuple) and len(item) >= 2:
+                uid_m = _UID_RE.search(item[0])
+                if not uid_m:
+                    continue
+                found[int(uid_m.group(1))] = (item[1] or b"").decode("utf-8", errors="replace")
     return found
 
 

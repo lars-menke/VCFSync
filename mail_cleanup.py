@@ -12,8 +12,12 @@ Grundsätze:
   * **Nichts wird endgültig gelöscht.** Mails wandern in den Papierkorb des
     Kontos und können dort zurückgeholt werden.
   * **Der Testlauf ist der Standard.** Ein echter Lauf braucht --execute.
-  * **Nur Kopfzeilen werden gelesen**, keine Mail-Texte. Alles bleibt lokal,
-    es wird nichts an einen Dienst gesendet.
+  * **Bewertet wird fast ausschließlich anhand von Kopfzeilen.** Eine eng
+    begrenzte Ausnahme: Mails, die sonst automatisch angehakt würden und bei
+    denen Betreff/Absender keinen Typ verraten, bekommen einen kurzen
+    Textausschnitt gegengelesen - als Sicherheitsnetz für Rechnungen und
+    Bank-/Behördenpost (siehe scan_accounts()). Alles bleibt lokal, es wird
+    nichts an einen Dienst gesendet.
   * **Das Tool lernt mit**: Nach jedem echten Lauf merkt es sich, welche
     Absender du gelöscht und welche du bewusst behalten hast, und bewertet
     beim nächsten Mal entsprechend.
@@ -66,6 +70,51 @@ AUTOMATED_PREFIXES = (
     "notifications", "notification", "newsletter", "mailer-daemon",
     "bounce", "bounces", "automail", "auto-confirm", "postmaster",
 )
+
+# ---------------------------------------------------------------------------
+# Mail-Typ-Erkennung: Rechnungen und Bank-/Behördenpost sollen nie von selbst
+# angehakt werden, auch wenn Alter/Absender/Betreff sonst klar für "delete"
+# sprechen (Kontoauszüge, Bescheide, Rechnungen sind oft länger relevant als
+# eine gewöhnliche Mail). Zwei Vertrauensstufen:
+#   - aus Betreff/Absender-Domain (schnell, ohne den Mailtext zu lesen)
+#   - aus einem kurzen Textausschnitt, aber NUR für Kandidaten, die sonst
+#     ohnehin weggeworfen würden und bei denen Betreff/Absender nichts
+#     verraten (siehe scan_accounts()) - keine pauschale Textanalyse.
+# Bewusst einfache, von Hand pflegbare Listen statt einer externen Datenbank
+# oder KI-Klassifikation.
+# ---------------------------------------------------------------------------
+
+OFFICIAL_DOMAIN_HINTS = (
+    "bank", "sparkasse", "volksbank", "raiffeisenbank", "postbank",
+    "comdirect", "consorsbank", "dkb.de", "ing.de", "versicherung",
+    "allianz.de", "ergo.de", "axa.de", "huk", "finanzamt", "steueramt",
+    "buergeramt", "buergerservice", "krankenkasse", "rentenversicherung",
+    "arbeitsagentur", "elster.de", "bund.de",
+)
+OFFICIAL_SUBJECT_HINTS = (
+    "kontoauszug", "steuerbescheid", "bescheid", "mahnung",
+    "versicherungsschein", "beitragsrechnung",
+)
+INVOICE_SUBJECT_HINTS = (
+    "rechnung", "bestellbestätigung", "bestellbestaetigung", "bestellung",
+    "quittung", "beleg", "invoice", "auftragsbestätigung",
+    "auftragsbestaetigung", "lieferschein", "zahlungsbestätigung",
+    "zahlungsbestaetigung", "kassenbon",
+)
+# Für die Textprüfung: Stichworte, die auch ohne verräterischen Betreff auf
+# eine Rechnung/amtliche Post hindeuten.
+BODY_TYPE_HINTS = {
+    "official": ("iban", "steuernummer", "versicherungsschein", "kundennummer",
+                "vertragsnummer", "aktenzeichen", "police-nr"),
+    "invoice": ("rechnungsnummer", "rechnungs-nr", "bestellnummer",
+               "auftragsnummer", "gesamtbetrag", "zahlbetrag"),
+}
+BODY_SNIPPET_BYTES = 3000
+
+MAIL_TYPE_LABELS_DE = {
+    "official": "Bank/Versicherung/Behörde",
+    "invoice": "Rechnung/Bestellung",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -388,12 +437,37 @@ def _learned_hint(mail, decisions):
     return 0, "", None
 
 
+def _detect_type_from_headers(mail):
+    """Mail-Typ aus Betreff und Absender-Domain schätzen - schnell, ohne den
+    Mailtext zu lesen. "official", "invoice" oder None."""
+    domain = (mail.get("domain") or "").lower()
+    subject = (mail.get("subject") or "").lower()
+    if (any(h in domain for h in OFFICIAL_DOMAIN_HINTS)
+            or any(h in subject for h in OFFICIAL_SUBJECT_HINTS)):
+        return "official"
+    if any(h in subject for h in INVOICE_SUBJECT_HINTS):
+        return "invoice"
+    return None
+
+
+def _detect_type_from_body(text):
+    """Wie _detect_type_from_headers(), aber anhand eines Textausschnitts -
+    nur für Kandidaten aufgerufen, bei denen die Kopfzeilen nichts verraten
+    (siehe scan_accounts())."""
+    low = (text or "").lower()
+    for type_key in ("official", "invoice"):
+        if any(h in low for h in BODY_TYPE_HINTS[type_key]):
+            return type_key
+    return None
+
+
 def score_mail(mail, decisions=None, settings=None, now=None, rules=None):
-    """Bewertet eine Mail: (punkte, empfehlung, begründungen).
+    """Bewertet eine Mail: (punkte, empfehlung, begründungen, mail_typ).
 
     empfehlung ist "delete", "unsure" oder "keep". Nur "delete" wird in Excel
     und Web-Oberfläche vorangehakt - alles andere muss der Nutzer selbst
-    ankreuzen.
+    ankreuzen. mail_typ ist "invoice", "official" oder None, aus Betreff und
+    Absender-Domain geschätzt.
 
     Reihenfolge der Entscheidung (die erste greifende gewinnt):
       1. eigene "nie löschen"-Regeln
@@ -401,49 +475,55 @@ def score_mail(mail, decisions=None, settings=None, now=None, rules=None):
       3. eigene "immer löschen"-Regeln
       4. Gelerntes aus früheren Entscheidungen
       5. Punktebewertung
-    Ausdrückliche Anweisungen des Nutzers stehen also über dem Gelernten,
-    aber unter den Schutzregeln - eine markierte oder ganz frische Mail wird
-    auch dann nicht vorgeschlagen, wenn ihr Absender auf "immer löschen" steht.
+      6. Voranhak-Sperre (zu jung) und Typ-Sperre (Rechnung/Bank/Behörde
+         erkannt) - beide kappen "delete" auf "unklar", statt die Mail ganz
+         zu verstecken.
+    Ausdrückliche Anweisungen des Nutzers (1, 3) und eindeutig Gelerntes (4)
+    stehen über der Typ-Sperre: wer eine Adresse ausdrücklich auf "immer
+    löschen" gesetzt oder eine bestimmte Rechnung schon dreimal weggeworfen
+    hat, weiß das besser als eine Stichwortsuche.
     """
     decisions = decisions if decisions is not None else load_decisions()
     rules = rules if rules is not None else load_rules()
     cfg = {**DEFAULT_SETTINGS, **(settings or {})}
     flags = [f.lower() for f in mail.get("flags", [])]
     reasons = []
+    mail_type = _detect_type_from_headers(mail)
 
     # --- 1. Eigene "nie löschen"-Regeln ---
     hit = _matches_sender(mail.get("from"), rules.get("never_delete", []))
     if hit:
-        return 0, "keep", [f"eigene Regel: nie löschen ({hit})"]
+        return 0, "keep", [f"eigene Regel: nie löschen ({hit})"], mail_type
     hit = _matches_subject(mail.get("subject"), rules.get("subject_never", []))
     if hit:
-        return 0, "keep", [f"eigene Betreffregel: nie löschen („{hit}“)"]
+        return 0, "keep", [f"eigene Betreffregel: nie löschen („{hit}“)"], mail_type
 
     # --- Harte Schutzregeln: nie vorschlagen, egal wie die Punkte stehen ---
     if "\\flagged" in flags:
-        return 0, "keep", ["markiert - wird nie vorgeschlagen"]
+        return 0, "keep", ["markiert - wird nie vorgeschlagen"], mail_type
     if "\\answered" in flags:
-        return 0, "keep", ["du hast geantwortet - wird nie vorgeschlagen"]
+        return 0, "keep", ["du hast geantwortet - wird nie vorgeschlagen"], mail_type
     if "\\draft" in flags:
-        return 0, "keep", ["Entwurf - wird nie vorgeschlagen"]
+        return 0, "keep", ["Entwurf - wird nie vorgeschlagen"], mail_type
 
     age = _age_days(mail, now)
     if age is None:
-        return 0, "keep", ["kein lesbares Datum - sicherheitshalber behalten"]
+        return 0, "keep", ["kein lesbares Datum - sicherheitshalber behalten"], mail_type
     if age < cfg["min_age_days"]:
-        return 0, "keep", [f"erst {age} Tage alt - wird nie vorgeschlagen"]
+        return 0, "keep", [f"erst {age} Tage alt - wird nie vorgeschlagen"], mail_type
 
     # --- 3. Eigene "immer löschen"-Regeln (nach den Schutzregeln!) ---
     hit = _matches_sender(mail.get("from"), rules.get("always_delete", []))
     if hit:
-        return cfg["delete_at"], "delete", [f"eigene Regel: immer löschen ({hit})"]
+        return (cfg["delete_at"], "delete",
+               [f"eigene Regel: immer löschen ({hit})"], mail_type)
 
     # --- 4. Gelerntes ---
     learned_points, learned_reason, learned_verdict = _learned_hint(mail, decisions)
     if learned_verdict == "keep":
-        return 0, "keep", [learned_reason + " - wird nie vorgeschlagen"]
+        return 0, "keep", [learned_reason + " - wird nie vorgeschlagen"], mail_type
     if learned_verdict == "delete":
-        return cfg["delete_at"], "delete", [learned_reason]
+        return cfg["delete_at"], "delete", [learned_reason], mail_type
 
     # --- Punktevergabe ---
     score = 0
@@ -493,6 +573,9 @@ def score_mail(mail, decisions=None, settings=None, now=None, rules=None):
         score += learned_points
         reasons.append(learned_reason)
 
+    if mail_type:
+        reasons.append(f"{MAIL_TYPE_LABELS_DE[mail_type]} erkannt")
+
     score = max(0, min(100, score))
     if score >= cfg["delete_at"]:
         recommendation = "delete"
@@ -511,7 +594,15 @@ def score_mail(mail, decisions=None, settings=None, now=None, rules=None):
         recommendation = "unsure"
         reasons.append(f"noch keine {cfg['precheck_min_age_days'] // 365 or 1} Jahr(e) alt "
                        "- nicht von selbst angehakt")
-    return score, recommendation, reasons
+
+    # Typ-Sperre: Rechnungen und Bank-/Behördenpost nie von selbst anhaken,
+    # egal wie eindeutig die Punkte sonst für "delete" sprechen - dafür sind
+    # sie oft zu lange relevant, um sie einer Punktzahl zu überlassen.
+    if mail_type and recommendation == "delete":
+        recommendation = "unsure"
+        reasons.append("wird deshalb nicht von selbst angehakt")
+
+    return score, recommendation, reasons, mail_type
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +617,13 @@ def scan_accounts(selection, settings=None, progress=None):
 
     selection: [{"account": "iCloud", "folders": ["INBOX", "Archiv"]}, ...]
     Gibt die Scan-Struktur zurück (und speichert sie über save_scan()).
+
+    Bewertet wird ausschließlich anhand von Kopfzeilen - mit einer eng
+    begrenzten Ausnahme: Kandidaten, die sonst automatisch angehakt würden
+    und bei denen Betreff/Absender keinen Mail-Typ verraten, bekommen einen
+    kurzen Textausschnitt gegengelesen (siehe _check_body_types()). Das ist
+    das einzige Werkzeug im Projekt, das überhaupt Mailtext liest, und auch
+    das nur für diese eine, eng umrissene Minderheit der Mails.
     """
     cfg = {**DEFAULT_SETTINGS, **(settings or {})}
     decisions = load_decisions()
@@ -551,12 +649,16 @@ def scan_accounts(selection, settings=None, progress=None):
 
                 mails, uidvalidity = mi.scan_folder(conn, folder, progress=on_block)
                 for mail in mails:
-                    score, recommendation, reasons = score_mail(mail, decisions, cfg,
-                                                                rules=rules)
+                    score, recommendation, reasons, mail_type = score_mail(
+                        mail, decisions, cfg, rules=rules)
                     mail["score"] = score
                     mail["recommendation"] = recommendation
                     mail["reasons"] = reasons
+                    mail["mail_type"] = mail_type
                     mail["delete"] = recommendation == "delete"
+
+                _check_body_types(conn, folder, mails, account["name"], progress)
+
                 acc_out["folders"].append(
                     {"folder": folder, "uidvalidity": uidvalidity, "mails": mails})
             scan["accounts"].append(acc_out)
@@ -565,6 +667,37 @@ def scan_accounts(selection, settings=None, progress=None):
 
     save_scan(scan)
     return scan
+
+
+def _check_body_types(conn, folder, mails, account_name, progress=None):
+    """Für Kandidaten ohne erkannten Typ, die sonst automatisch angehakt
+    würden, einen kurzen Textausschnitt gegenlesen - "bei Bedarf", nicht
+    pauschal. Ändert mail_type/recommendation/reasons direkt auf den
+    betroffenen Mail-Dicts.
+    """
+    candidates = [m for m in mails
+                 if m["recommendation"] == "delete" and not m["mail_type"]]
+    if not candidates:
+        return
+    if progress:
+        progress(f"{account_name}: '{folder}' - {len(candidates)} Kandidaten "
+                 "auf Rechnung/Bank/Behörde prüfen ...")
+    try:
+        snippets = mi.fetch_body_snippets(conn, folder, [m["uid"] for m in candidates])
+    except Exception:  # noqa: BLE001 - Zusatzprüfung, darf den Scan nicht kippen
+        return
+
+    by_uid = {m["uid"]: m for m in candidates}
+    for uid, text in snippets.items():
+        mail_type = _detect_type_from_body(text)
+        if not mail_type:
+            continue
+        mail = by_uid[uid]
+        mail["mail_type"] = mail_type
+        mail["recommendation"] = "unsure"
+        mail["delete"] = False
+        mail["reasons"].append(f"{MAIL_TYPE_LABELS_DE[mail_type]} im Text erkannt - "
+                               "wird deshalb nicht von selbst angehakt")
 
 
 def save_scan(scan):
@@ -622,11 +755,11 @@ def scan_summary(scan):
 # ---------------------------------------------------------------------------
 
 EXCEL_COLUMNS = [
-    "Konto", "Ordner", "UID", "Löschen", "Empfehlung", "Punkte", "Begründung",
+    "Konto", "Ordner", "UID", "Löschen", "Empfehlung", "Typ", "Punkte", "Begründung",
     "Datum", "Alter (Tage)", "Von", "Absender", "Domain", "Betreff",
     "Größe (KB)", "Anhang", "Anhangnamen", "Gelesen", "Markiert", "Beantwortet",
 ]
-_EXCEL_WIDTHS = [16, 22, 10, 9, 12, 8, 46, 12, 12, 26, 34, 22, 52,
+_EXCEL_WIDTHS = [16, 22, 10, 9, 12, 22, 8, 46, 12, 12, 26, 34, 22, 52,
                  12, 9, 32, 9, 9, 12]
 
 
@@ -656,6 +789,7 @@ def scan_to_excel(scan, path):
             acc["account"], folder["folder"], mail["uid"],
             "x" if mail.get("delete") else "",
             RECOMMENDATION_DE.get(mail.get("recommendation"), ""),
+            MAIL_TYPE_LABELS_DE.get(mail.get("mail_type"), ""),
             mail.get("score", 0), ", ".join(mail.get("reasons", [])),
             (mail.get("date") or "")[:10], age if age is not None else "",
             mail.get("from_name", ""), mail.get("from", ""), mail.get("domain", ""),
