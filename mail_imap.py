@@ -262,6 +262,18 @@ _FILENAME_RE = re.compile(rb'"filename"\s+"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
 MAX_ATTACHMENT_NAMES = 5
 
 
+def _header_str(value):
+    """msg.get(...) in jedem Fall als str zurückgeben.
+
+    Enthält eine Kopfzeile rohe Bytes, die sich nicht als UTF-8 lesen lassen
+    (kaputt kodierte alte oder fremde Mails, ohne korrektes RFC-2047-Encoding),
+    liefert Message.get() dafür laut email-Paket (Compat32.header_fetch_parse)
+    ein email.header.Header-Objekt statt str. Jedes direkte .strip() darauf
+    bricht dann mit AttributeError ab - str() macht zuverlässig Text daraus.
+    """
+    return "" if value is None else str(value)
+
+
 def _decode_header_value(raw):
     """MIME-kodierte Kopfzeile (=?utf-8?B?...?=) in lesbaren Text."""
     if not raw:
@@ -275,7 +287,7 @@ def _decode_header_value(raw):
 def _parse_date(msg, internaldate):
     """Versanddatum als UTC-datetime. Date-Kopfzeile bevorzugt, sonst das vom
     Server vergebene INTERNALDATE (fehlende/kaputte Date-Header sind häufig)."""
-    raw = msg.get("Date")
+    raw = _header_str(msg.get("Date"))
     if raw:
         try:
             dt = email.utils.parsedate_to_datetime(raw)
@@ -349,7 +361,7 @@ def _parse_fetch_item(prefix, header_bytes):
     date_m = _INTERNALDATE_RE.search(prefix)
 
     msg = BytesParser().parsebytes(header_bytes or b"")
-    from_raw = msg.get("From", "")
+    from_raw = _header_str(msg.get("From"))
     display, address = email.utils.parseaddr(from_raw)
     address = (address or "").strip().lower()
 
@@ -366,11 +378,11 @@ def _parse_fetch_item(prefix, header_bytes):
         "from": address,
         "domain": address.rpartition("@")[2],
         "subject": _decode_header_value(msg.get("Subject", "")),
-        "message_id": (msg.get("Message-ID") or "").strip(),
-        "list_unsubscribe": (msg.get("List-Unsubscribe") or "").strip(),
-        "list_id": (msg.get("List-Id") or "").strip(),
-        "precedence": (msg.get("Precedence") or "").strip().lower(),
-        "auto_submitted": (msg.get("Auto-Submitted") or "").strip().lower(),
+        "message_id": _header_str(msg.get("Message-ID")).strip(),
+        "list_unsubscribe": _header_str(msg.get("List-Unsubscribe")).strip(),
+        "list_id": _header_str(msg.get("List-Id")).strip(),
+        "precedence": _header_str(msg.get("Precedence")).strip().lower(),
+        "auto_submitted": _header_str(msg.get("Auto-Submitted")).strip().lower(),
     }
 
 
@@ -468,7 +480,7 @@ def fetch_message_ids(conn, uids):
                 if not uid_m:
                     continue
                 msg = BytesParser().parsebytes(item[1] or b"")
-                found[int(uid_m.group(1))] = (msg.get("Message-ID") or "").strip()
+                found[int(uid_m.group(1))] = _header_str(msg.get("Message-ID")).strip()
     return found
 
 
