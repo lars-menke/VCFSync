@@ -560,6 +560,39 @@ Gmail bildet Labels als IMAP-Ordner ab; eine Mail kann daher in mehreren
 Ordnern auftauchen. „Alle Nachrichten" wird bewusst nicht durchsucht.
 Verschieben in den Papierkorb entfernt die Mail bei Gmail aus allen Labels.
 
+## E-Mail suchen: "Wo ist meine Mail hin?"
+
+Eine eigene, vom Aufräumen komplett unabhängige Funktion, um eine bestimmte
+Mail wiederzufinden — im Browser unter **Suchen** (dritter Reiter neben
+Kontakte/E-Mail), auf der Kommandozeile mit `suche`. Rein lesend, verändert
+nichts.
+
+**Der entscheidende Unterschied zum Aufräumen:** Die Suche durchsucht
+absichtlich **alle** Ordner eines Kontos — auch Papierkorb, Spam und
+Entwürfe, die das Aufräumen bewusst ausschließt. Wenn eine Mail „verschwunden"
+ist, aber nicht wirklich weg (endgültig gelöscht wird hier nie etwas), liegt
+sie fast immer genau dort, am häufigsten im **Papierkorb** — etwa weil ein
+früherer Aufräumlauf sie verschoben hat.
+
+```bash
+python mail_cleanup.py suche --von amazon                    # Absender enthält …
+python mail_cleanup.py suche --betreff Rechnung --seit 2024-01-01
+python mail_cleanup.py suche --text "Bestellnummer 4711"     # auch im Mailtext
+python mail_cleanup.py suche --account iCloud --ordner Archiv --von chef
+```
+
+Mindestens ein Kriterium ist Pflicht (Absender, Betreff, Zeitraum oder Text) —
+alles sind einfache Teiltextsuchen ohne Groß-/Kleinschreibung, keine regulären
+Ausdrücke. In der Trefferliste steht auch, ob eine Mail als gelöscht markiert
+ist (`\Deleted`) — genau das Bild, das ein Server ohne `MOVE` hinterlässt
+(siehe „Im Mailprogramm ist nichts passiert" oben).
+
+**Textsuche** liest dafür den Mailtext einzelner Mails gegen (weiterhin nur
+`BODY.PEEK`, nichts wird als gelesen markiert) und ist deshalb langsamer als
+eine reine Kopfzeilensuche — pro Ordner auf die ersten 500 Mails begrenzt,
+die Gesamttrefferliste auf 500 Einträge. Wird das erreicht, meldet das Tool
+das ausdrücklich, statt eine unvollständige Liste kommentarlos zu zeigen.
+
 ## Datenschutzhinweis
 
 - Repository unbedingt **privat** halten

@@ -606,6 +606,123 @@ def score_mail(mail, decisions=None, settings=None, now=None, rules=None):
 
 
 # ---------------------------------------------------------------------------
+# Suchen
+# ---------------------------------------------------------------------------
+# Eigenständig von scan_accounts() unten: Die Suche soll "wo ist meine Mail
+# hin?" beantworten können - dafür MUSS sie auch dort suchen, wohin das
+# Aufräumen selbst verschiebt (Papierkorb) und wo Aufräumen bewusst nie
+# hinschaut (Spam, Entwürfe, Gesendet). Deshalb keine is_skipped_folder()-
+# Ausschlüsse hier, nur nicht auswählbare Ordner (\Noselect) fallen weg.
+
+MAX_SEARCH_RESULTS = 500          # Sicherheitsnetz gegen eine ausufernde Liste
+MAX_BODY_SEARCH_PER_FOLDER = 500  # Textsuche liest echte Mailinhalte - begrenzt
+
+
+def _matches_search(mail, criteria):
+    """Kopfzeilen-Kriterien einer Mail gegenprüfen - einfache Teiltextsuche,
+    keine regulären Ausdrücke (siehe Regel-Matching weiter oben: bewusst so
+    gehalten, damit sich Kriterien ohne Vorkenntnisse eingeben lassen)."""
+    sender = criteria.get("sender", "").strip().lower()
+    if sender and sender not in ((mail.get("from") or "") + " " +
+                                 (mail.get("from_name") or "")).lower():
+        return False
+    subject = criteria.get("subject", "").strip().lower()
+    if subject and subject not in (mail.get("subject") or "").lower():
+        return False
+    date = (mail.get("date") or "")[:10]
+    since = criteria.get("since", "").strip()
+    if since and (not date or date < since):
+        return False
+    before = criteria.get("before", "").strip()
+    if before and (not date or date > before):
+        return False
+    return True
+
+
+def search_mails(selection, criteria, progress=None):
+    """Postfach nach eigenen Vorgaben durchsuchen - rein lesend, über ALLE
+    Ordner eines Kontos (siehe Kommentar oben), nicht nur die zum Aufräumen
+    sinnvollen.
+
+    selection: [{"account": "iCloud"}, ...] - ohne "folders" werden alle
+    durchsucht; mit "folders": [...] nur die genannten.
+    criteria: {"sender": str, "subject": str, "since": "YYYY-MM-DD",
+              "before": "YYYY-MM-DD", "body_text": str}
+    Gibt {"hits": [...], "truncated": bool, "folders_searched": int} zurück.
+    Kein Scan-Stand wird gespeichert - die Suche ist eine Momentaufnahme für
+    eine einzelne Anfrage, kein mehrstufiger Ablauf wie beim Aufräumen.
+    """
+    body_text = (criteria.get("body_text") or "").strip().lower()
+    other_criteria = any(criteria.get(k, "").strip()
+                         for k in ("sender", "subject", "since", "before"))
+
+    hits, truncated, folders_searched = [], False, 0
+
+    for entry in selection:
+        if truncated:
+            break
+        account = account_by_name(entry["account"])
+        conn = connect_account(account)
+        try:
+            wanted_folders = entry.get("folders")
+            if wanted_folders:
+                folders = wanted_folders
+            else:
+                folders = [name for name, flags in mi.list_folders(conn)
+                          if "\\noselect" not in [f.lower() for f in flags]]
+
+            for folder in folders:
+                if truncated:
+                    break
+                if progress:
+                    progress(f"{account['name']}: durchsuche '{folder}' ...")
+                try:
+                    mails, _uidvalidity = mi.scan_folder(conn, folder)
+                except Exception as e:  # noqa: BLE001 - ein sperriger Ordner
+                    if progress:               # darf die Suche nicht kippen
+                        progress(f"{account['name']}: '{folder}' übersprungen ({e})")
+                    continue
+                folders_searched += 1
+
+                matched = [m for m in mails if _matches_search(m, criteria)]
+
+                if body_text:
+                    # Nur die durch Kopfzeilen schon eingegrenzten Mails
+                    # gegenlesen - außer body_text ist das einzige Kriterium,
+                    # dann bleibt nichts anderes übrig, als den ganzen (bis
+                    # zur Grenze) Ordner zu prüfen.
+                    pool = matched if other_criteria else mails
+                    if len(pool) > MAX_BODY_SEARCH_PER_FOLDER:
+                        pool = pool[:MAX_BODY_SEARCH_PER_FOLDER]
+                        truncated = True
+                    try:
+                        snippets = mi.fetch_body_snippets(conn, folder,
+                                                          [m["uid"] for m in pool])
+                    except Exception:  # noqa: BLE001 - Text ist ein Zusatz, kein Muss
+                        snippets = {}
+                    matched = [m for m in pool
+                              if body_text in snippets.get(m["uid"], "").lower()]
+
+                for mail in matched:
+                    hits.append({
+                        "account": account["name"], "folder": folder,
+                        "uid": mail["uid"], "from": mail.get("from", ""),
+                        "from_name": mail.get("from_name", ""),
+                        "subject": mail.get("subject", ""),
+                        "date": mail.get("date", ""), "size": mail.get("size", 0),
+                        "flags": mail.get("flags", []),
+                    })
+                    if len(hits) >= MAX_SEARCH_RESULTS:
+                        truncated = True
+                        break
+        finally:
+            mi.close(conn)
+
+    hits.sort(key=lambda h: h.get("date") or "", reverse=True)
+    return {"hits": hits, "truncated": truncated, "folders_searched": folders_searched}
+
+
+# ---------------------------------------------------------------------------
 # Scannen
 # ---------------------------------------------------------------------------
 
@@ -1186,6 +1303,41 @@ def cmd_diagnose(args):
                   f"{folder['deleted']:>24}{mark}")
 
 
+def cmd_suche(args):
+    """Postfach durchsuchen - rein lesend, über alle Ordner (auch
+    Papierkorb/Spam), egal was das Aufräumen selbst ausschließt."""
+    accounts = load_accounts()
+    if args.account:
+        accounts = [account_by_name(args.account)]
+    if not accounts:
+        print("Noch keine Konten eingerichtet.")
+        return
+    if not any([args.von, args.betreff, args.seit, args.bis, args.text]):
+        print("Bitte mindestens ein Kriterium angeben (--von, --betreff, "
+              "--seit, --bis oder --text).")
+        return
+
+    selection = [{"account": a["name"],
+                 **({"folders": args.ordner} if args.ordner else {})}
+                for a in accounts]
+    criteria = {"sender": args.von or "", "subject": args.betreff or "",
+               "since": args.seit or "", "before": args.bis or "",
+               "body_text": args.text or ""}
+
+    result = search_mails(selection, criteria,
+                          progress=lambda m: print(f"  {m}", flush=True))
+    hits = result["hits"]
+    print(f"\n{result['folders_searched']} Ordner durchsucht, {len(hits)} Treffer"
+         + (" (Liste gekappt - bitte enger eingrenzen)" if result["truncated"] else "") + ".\n")
+    if not hits:
+        return
+    print(f"{'Datum':<11} {'Konto':<14} {'Ordner':<18} {'Von':<28} Betreff")
+    for h in hits:
+        flags = ",".join(f.lstrip("\\") for f in h["flags"]) or "-"
+        print(f"{(h['date'] or '')[:10]:<11} {h['account']:<14} {h['folder']:<18} "
+             f"{h['from']:<28} {h['subject']}  [{flags}]")
+
+
 _RULE_LABELS = {
     "never_delete": "nie löschen (Absender)",
     "always_delete": "immer löschen (Absender)",
@@ -1296,10 +1448,23 @@ def main():
                          "der Papierkorb? (nur lesend)")
     diagnose.add_argument("--account", metavar="NAME", help="Nur dieses Konto")
 
+    suche = sub.add_parser(
+        "suche", help="Postfach durchsuchen - über ALLE Ordner, auch Papierkorb "
+                      "und Spam (nur lesend)")
+    suche.add_argument("--account", metavar="NAME", help="Nur dieses Konto (Standard: alle)")
+    suche.add_argument("--ordner", action="append", metavar="NAME",
+                       help="Nur diese Ordner (mehrfach angebbar; Standard: alle)")
+    suche.add_argument("--von", metavar="TEXT", help="Absender enthält …")
+    suche.add_argument("--betreff", metavar="TEXT", help="Betreff enthält …")
+    suche.add_argument("--seit", metavar="JJJJ-MM-TT", help="Nur ab diesem Datum")
+    suche.add_argument("--bis", metavar="JJJJ-MM-TT", help="Nur bis zu diesem Datum")
+    suche.add_argument("--text", metavar="TEXT",
+                       help="Auch im Mailtext suchen (langsamer, siehe README)")
+
     args = parser.parse_args()
     handlers = {"konten": cmd_konten, "scan": cmd_scan, "to-excel": cmd_to_excel,
                 "from-excel": cmd_from_excel, "clean": cmd_clean, "regeln": cmd_regeln,
-                "gelernt": cmd_gelernt, "diagnose": cmd_diagnose}
+                "gelernt": cmd_gelernt, "diagnose": cmd_diagnose, "suche": cmd_suche}
     try:
         handlers[args.cmd](args)
     except RuntimeError as e:

@@ -311,9 +311,47 @@ def _run_mail_clean(dry_run):
         _job_finish(error=str(e))
 
 
+def _run_mail_search(selection, criteria):
+    try:
+        result = mc.search_mails(
+            selection, criteria,
+            progress=lambda message: _job_progress(0, 0, message))
+        _job_finish(result={"kind": "search", **result})
+    except Exception as e:  # noqa: BLE001
+        _job_finish(error=str(e))
+
+
 @app.route("/mail")
 def mail_index():
     return render_template_string(MAIL_PAGE)
+
+
+@app.route("/mail/suche")
+def mail_search_index():
+    return render_template_string(MAIL_SEARCH_PAGE)
+
+
+@app.route("/api/mail/search", methods=["POST"])
+def api_mail_search():
+    """Postfach durchsuchen - über ALLE Ordner, auch die das Aufräumen
+    bewusst ausschließt (Papierkorb, Spam). Läuft im Hintergrund wie scan/
+    clean, weil ein ganzes Konto ohne Ordnerauswahl dauern kann."""
+    data = request.json or {}
+    criteria = {k: (data.get(k) or "").strip()
+               for k in ("sender", "subject", "since", "before", "body_text")}
+    if not any(criteria.values()):
+        return jsonify({"error": "Bitte mindestens ein Kriterium angeben."}), 400
+
+    accounts = mc.load_accounts()
+    if not accounts:
+        return jsonify({"error": "Noch kein Konto eingerichtet."}), 400
+    wanted = data.get("account")
+    names = [wanted] if wanted else [a["name"] for a in accounts]
+    selection = [{"account": name} for name in names]
+
+    if not _start("mailsearch", _run_mail_search, selection, criteria):
+        return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
+    return jsonify({"started": True})
 
 
 @app.route("/api/mail/accounts", methods=["GET", "POST", "DELETE"])
@@ -878,6 +916,30 @@ def _head(title):
     return _HEAD_BEFORE_TITLE + title + _HEAD_AFTER_TITLE + BASE_CSS + "\n</head>\n<body>\n"
 
 
+_NAV_LINKS = (
+    ("/", "Kontakte",
+     '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>'),
+    ("/mail", "E-Mail",
+     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>'),
+    ("/mail/suche", "Suchen",
+     '<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>'),
+)
+
+
+def _nav(active_href):
+    """Dieselbe Navigation auf allen drei Seiten (Kontakte, E-Mail, Suchen) -
+    einmal definiert, damit sie beim Ändern nicht auseinanderlaufen."""
+    links = "\n      ".join(
+        '<a href="{href}"{cls}>\n'
+        '        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round">{icon}</svg>\n'
+        '        {label}\n      </a>'.format(
+            href=href, label=label, icon=icon,
+            cls=' class="active"' if href == active_href else "")
+        for href, label, icon in _NAV_LINKS)
+    return f'<nav class="nav">\n      {links}\n    </nav>'
+
+
 PAGE = _head("iCloud Kontakte Sync") + """
 <div class="page">
 
@@ -892,20 +954,7 @@ PAGE = _head("iCloud Kontakte Sync") + """
       <h1>iCloud Kontakte Sync</h1>
       <p class="sub">Angemeldet als <strong>{{ user or "—" }}</strong></p>
     </div>
-    <nav class="nav">
-      <a href="/" class="active">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-        </svg>
-        Kontakte
-      </a>
-      <a href="/mail">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
-        </svg>
-        E-Mail
-      </a>
-    </nav>
+    __NAV__
   </div>
 
   {% if not creds_ok %}
@@ -1181,7 +1230,7 @@ refresh();
 </script>
 </body>
 </html>
-"""
+""".replace("__NAV__", _nav("/"))
 
 
 MAIL_PAGE = _head("E-Mail aufräumen") + """
@@ -1197,20 +1246,7 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
       <h1>E-Mail aufräumen</h1>
       <p class="sub">Vorschläge prüfen, dann in den Papierkorb verschieben</p>
     </div>
-    <nav class="nav">
-      <a href="/">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-        </svg>
-        Kontakte
-      </a>
-      <a href="/mail" class="active">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
-        </svg>
-        E-Mail
-      </a>
-    </nav>
+    __NAV__
   </div>
 
   <div class="callout callout-info">
@@ -1930,7 +1966,180 @@ refresh();
 </script>
 </body>
 </html>
-"""
+""".replace("__NAV__", _nav("/mail"))
+
+
+MAIL_SEARCH_PAGE = _head("E-Mail suchen") + """
+<div class="page">
+
+  <div class="topbar">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+    </div>
+    <div>
+      <h1>E-Mail suchen</h1>
+      <p class="sub">Eine bestimmte Mail wiederfinden - über das ganze Postfach</p>
+    </div>
+    __NAV__
+  </div>
+
+  <div class="callout callout-info">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+    </svg>
+    <div>Durchsucht <strong>alle Ordner</strong> eines Kontos, auch Papierkorb,
+    Spam und Entwürfe - anders als beim Aufräumen, wo diese bewusst
+    ausgeschlossen sind. Rein lesend, es wird nichts verändert.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+      </div>
+      <div>
+        <h2>Suchkriterien</h2>
+        <p class="muted desc">Mindestens eines ausfüllen. Alle Angaben sind
+           einfache Teiltextsuchen, keine Groß-/Kleinschreibung.</p>
+      </div>
+    </div>
+    <div class="form-grid">
+      <label>Konto
+        <select id="sAccount"><option value="">Alle Konten</option></select>
+      </label>
+      <label>Von enthält<input id="sSender" placeholder="z.B. amazon oder chef@firma.de"></label>
+      <label>Betreff enthält<input id="sSubject" placeholder="z.B. Rechnung"></label>
+      <label>Seit<input id="sSince" type="date"></label>
+      <label>Bis<input id="sBefore" type="date"></label>
+      <label>Auch im Mailtext suchen
+        <input id="sBody" placeholder="z.B. Bestellnummer 4711">
+      </label>
+    </div>
+    <p class="muted" style="font-size:.82rem">Textsuche liest die Mails selbst
+       gegen (weiterhin nur lesend) und ist deshalb langsamer - je Ordner auf
+       die ersten 500 Mails begrenzt.</p>
+    <button id="btnSearch" class="btn btn-accent" onclick="startSearch()">Suchen</button>
+  </div>
+
+  <div id="status" aria-live="polite"></div>
+
+  <div id="resultArea"></div>
+
+</div>
+<script>
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function kb(bytes){
+  if(bytes >= 1048576) return (bytes/1048576).toFixed(1) + ' MB';
+  return Math.round(bytes/1024) + ' KB';
+}
+async function jget(url){
+  const r = await fetch(url);
+  return await r.json();
+}
+async function jpost(url, body, method){
+  const r = await fetch(url, {method: method || 'POST',
+    headers: {'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+  return {ok: r.ok, data: await r.json()};
+}
+const I_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>';
+const I_BAD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>';
+const I_WARN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>';
+
+async function loadAccounts(){
+  const j = await jget('/api/mail/accounts');
+  const sel = document.getElementById('sAccount');
+  j.accounts.forEach(a => {
+    const o = document.createElement('option');
+    o.value = a.name; o.textContent = a.name;
+    sel.appendChild(o);
+  });
+}
+
+let polling = null;
+function poll(){
+  if(polling) clearInterval(polling);
+  polling = setInterval(refresh, 700);
+  refresh();
+}
+
+async function startSearch(){
+  const criteria = {
+    account: document.getElementById('sAccount').value,
+    sender: document.getElementById('sSender').value,
+    subject: document.getElementById('sSubject').value,
+    since: document.getElementById('sSince').value,
+    before: document.getElementById('sBefore').value,
+    body_text: document.getElementById('sBody').value,
+  };
+  const res = await jpost('/api/mail/search', criteria);
+  if(!res.ok){ alert(res.data.error); return; }
+  document.getElementById('resultArea').innerHTML = '';
+  poll();
+}
+
+async function refresh(){
+  const j = await jget('/api/status');
+  const s = document.getElementById('status');
+  const busy = j.running && j.kind === 'mailsearch';
+
+  document.getElementById('btnSearch').disabled = j.running;
+  if(busy){
+    s.innerHTML = '<div class="card"><div class="status-head">' +
+      '<span class="spinner"></span><span class="status-title">Durchsuche Postfach ...</span>' +
+      '</div><p class="muted">' + esc(j.message) + '</p></div>';
+    return;
+  }
+  if(polling){ clearInterval(polling); polling = null; }
+  if(j.error){
+    s.innerHTML = '<div class="card"><div class="status-head bad">' + I_BAD +
+      '<span class="status-title">Fehler</span></div><p>' + esc(j.error) + '</p></div>';
+    return;
+  }
+  if(!j.result || j.result.kind !== 'search'){ return; }
+  renderResult(j.result);
+}
+
+function renderResult(r){
+  const s = document.getElementById('status');
+  const hits = r.hits || [];
+  s.innerHTML = '<div class="card"><div class="status-head ' + (hits.length ? 'ok' : 'warn-text') + '">' +
+    (hits.length ? I_OK : I_WARN) +
+    '<span class="status-title">' + hits.length + ' Treffer in ' + r.folders_searched + ' Ordnern</span></div>' +
+    (r.truncated ? '<p class="muted">Liste wurde begrenzt - bitte die Kriterien enger fassen, ' +
+      'wenn die gesuchte Mail nicht dabei ist.</p>' : '') + '</div>';
+
+  const area = document.getElementById('resultArea');
+  if(!hits.length){ area.innerHTML = ''; return; }
+
+  area.innerHTML = '<div class="card"><table class="diag-table"><thead><tr>' +
+    '<th>Datum</th><th>Konto</th><th>Ordner</th><th>Von</th><th>Betreff</th>' +
+    '<th class="num">Größe</th><th>Kennzeichen</th></tr></thead><tbody>' +
+    hits.map(h => {
+      const flags = (h.flags || []).map(f => f.replace('\\\\', ''));
+      const deleted = flags.some(f => f.toLowerCase() === 'deleted');
+      return '<tr' + (deleted ? ' class="diag-hit"' : '') + '>' +
+        '<td>' + esc((h.date || '').slice(0, 10)) + '</td>' +
+        '<td>' + esc(h.account) + '</td>' +
+        '<td>' + esc(h.folder) + (deleted ? ' <span class="muted">(als gelöscht markiert)</span>' : '') + '</td>' +
+        '<td>' + esc(h.from_name || h.from) + '</td>' +
+        '<td>' + esc(h.subject || '(kein Betreff)') + '</td>' +
+        '<td class="num">' + kb(h.size) + '</td>' +
+        '<td class="muted">' + esc(flags.join(', ')) + '</td></tr>';
+    }).join('') +
+    '</tbody></table></div>';
+}
+
+loadAccounts();
+</script>
+</body>
+</html>
+""".replace("__NAV__", _nav("/mail/suche"))
 
 
 if __name__ == "__main__":
