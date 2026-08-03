@@ -2143,9 +2143,13 @@ loadAccounts();
 
 
 if __name__ == "__main__":
-    host = os.environ.get("HOST", "127.0.0.1")
+    # 0.0.0.0 statt 127.0.0.1: in Codespaces/Dev-Containern ist der Server auf
+    # 127.0.0.1 nur innerhalb des Containers erreichbar - die Portweiterleitung
+    # kommt dann nicht durch, obwohl der Prozess sauber läuft. 0.0.0.0 ist
+    # GitHubs eigene Empfehlung für Codespaces und schadet lokal nicht.
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "5000"))
     print(f"iCloud Kontakte Sync - Web-Oberfläche")
-    print(f"Öffne im Browser: http://{host}:{port}")
-    print(f"E-Mail aufräumen:  http://{host}:{port}/mail")
+    print(f"Öffne im Browser: http://127.0.0.1:{port}")
+    print(f"E-Mail aufräumen:  http://127.0.0.1:{port}/mail")
     app.run(host=host, port=port, debug=False)
