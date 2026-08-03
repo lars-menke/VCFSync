@@ -360,7 +360,24 @@ python mail_cleanup.py konten --folders iCloud          # Ordner auflisten
 python mail_cleanup.py scan --account iCloud --folder INBOX --folder "Archiv 2023"
 python mail_cleanup.py scan --min-age 365               # nur Mails ab 1 Jahr
 python mail_cleanup.py diagnose                         # Postfach prüfen (nur lesend)
+python mail_cleanup.py scan --reset                     # gespeicherte Liste verwerfen
 ```
+
+### Die Liste ist eine Momentaufnahme
+
+Was unter „3 · Prüfen" steht, stammt aus dem letzten Durchsuchen — es ist kein
+Live-Blick ins Postfach. Nach einem echten Aufräumlauf hat sich das Postfach
+verändert, die Liste also nicht mehr. Sie zeigt dann oben einen Hinweis mit dem
+Stand und bittet ums Neueinlesen.
+
+Aus der Liste fallen nur Mails, bei denen nach dem Verschieben nachgesehen wurde
+und die tatsächlich verschwunden sind. Übersprungene und nur markierte Mails
+bleiben stehen — sie liegen ja auch noch im Postfach.
+
+Passt die Liste trotzdem einmal nicht mehr zum Postfach, hilft **Liste
+verwerfen** in Karte 3 bzw. `python mail_cleanup.py scan --reset` und danach
+neu durchsuchen. Am Postfach ändert das nichts; es wird nur der gespeicherte
+Stand weggeworfen.
 
 ### Wonach bewertet wird
 

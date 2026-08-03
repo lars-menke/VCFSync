@@ -368,6 +368,13 @@ def api_mail_diagnose():
         return _mail_error(e)
 
 
+@app.route("/api/mail/scan", methods=["DELETE"])
+def api_mail_scan_clear():
+    """Gespeicherte Liste verwerfen. Rührt das Postfach nicht an - es wird nur
+    der Stand weggeworfen, mit dem das Werkzeug arbeitet."""
+    return jsonify({"cleared": mc.clear_scan()})
+
+
 @app.route("/api/mail/scan", methods=["POST"])
 def api_mail_scan():
     data = request.json or {}
@@ -424,6 +431,7 @@ def api_mail_result():
         group["mails"].sort(key=lambda m: m["date"])
         group["attachments"] = sum(1 for m in group["mails"] if m["attachment"])
     return jsonify({"groups": ordered, "summary": mc.scan_summary(scan),
+                    "created": scan.get("created"),
                     "executed": scan.get("executed")})
 
 
@@ -1276,6 +1284,7 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
       <a href="/api/mail/download/xlsx" class="btn btn-secondary">Als Excel herunterladen</a>
       <label class="file-label" for="mailFile">Bearbeitete Excel hochladen</label>
       <input type="file" id="mailFile" accept=".xlsx" onchange="uploadExcel()">
+      <button class="btn btn-secondary" onclick="discardScan()">Liste verwerfen</button>
     </div>
     <p id="uploadInfo" class="muted"></p>
     <fieldset class="target-group" id="sortBox" style="display:none">
@@ -1539,6 +1548,21 @@ async function startScan(){
 /* ---------- Ergebnis ---------- */
 let groupData = [];
 let summaryData = null;
+let scanInfo = {};       // Wann eingelesen, wann zuletzt aufgeräumt
+
+/* Die Liste ist eine Momentaufnahme des Postfachs, kein Live-Blick hinein.
+   Passt sie nicht mehr, wirft man sie weg und liest neu ein. */
+async function discardScan(){
+  if(!confirm('Gespeicherte Liste verwerfen? Im Postfach ändert sich dadurch ' +
+              'nichts — du musst danach neu durchsuchen.')) return;
+  await jpost('/api/mail/scan', {}, 'DELETE');
+  groupData = []; summaryData = null; selected = new Set(); scanInfo = {};
+  document.getElementById('sortBox').style.display = 'none';
+  document.getElementById('uploadInfo').textContent = '';
+  document.getElementById('resultArea').innerHTML =
+    '<p class="muted">Liste verworfen. Oben unter „2 · Durchsuchen" neu einlesen.</p>';
+  document.getElementById('btnRealClean').disabled = true;
+}
 
 async function loadResult(){
   const j = await jget('/api/mail/result');
@@ -1550,6 +1574,7 @@ async function loadResult(){
   }
   groupData = j.groups;
   summaryData = j.summary;
+  scanInfo = {created: j.created, executed: j.executed};
   selected = new Set();
   groupData.forEach(g => g.mails.forEach(m => { if(m.delete) selected.add(m.key); }));
   document.getElementById('sortBox').style.display = groupData.length ? '' : 'none';
@@ -1567,12 +1592,34 @@ function selectedBytes(){
   return total;
 }
 
+function stamp(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString('de-DE',
+    {day: '2-digit', month: '2-digit', year: 'numeric',
+     hour: '2-digit', minute: '2-digit'});
+}
+
 function renderGroups(){
   const area = document.getElementById('resultArea');
   if(!summaryData) return;
   const s = summaryData;
 
-  let html = '<div class="stat-grid">' +
+  // Nach einem echten Lauf hat sich das Postfach geändert - die Liste zeigt
+  // dann zwangsläufig einen alten Stand. Das muss dranstehen, sonst hält man
+  // sie für den Blick ins Postfach, der sie nicht ist.
+  let html = '';
+  if(scanInfo.executed){
+    html += '<div class="callout callout-warn">' + I_WARN + '<div>Diese Liste ist ' +
+      'vom ' + esc(stamp(scanInfo.created)) + ' und wurde nach dem Aufräumen ' +
+      '(' + esc(stamp(scanInfo.executed)) + ') <b>nicht neu eingelesen</b> — sie ' +
+      'kann vom Postfach abweichen. Oben unter „2 · Durchsuchen" neu einlesen ' +
+      'oder die Liste verwerfen.</div></div>';
+  } else if(scanInfo.created){
+    html += '<p class="muted">Stand: ' + esc(stamp(scanInfo.created)) + '</p>';
+  }
+
+  html += '<div class="stat-grid">' +
     '<div class="stat-tile"><div class="stat-value">' + s.total + '</div><div class="stat-label">Geprüft</div></div>' +
     '<div class="stat-tile"><div class="stat-value">' + s.delete + '</div><div class="stat-label">Vorgeschlagen</div></div>' +
     '<div class="stat-tile"><div class="stat-value" id="selCount">' + selected.size + '</div><div class="stat-label">Ausgewählt</div></div>' +

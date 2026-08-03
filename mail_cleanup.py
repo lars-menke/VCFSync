@@ -578,6 +578,18 @@ def load_scan():
     return json.loads(SCAN_FILE.read_text(encoding="utf-8"))
 
 
+def clear_scan():
+    """Gespeicherten Scan verwerfen.
+
+    Die Liste ist eine Momentaufnahme. Wenn sie nicht mehr zum Postfach passt,
+    ist sie wertlos - dann lieber wegwerfen und neu einlesen, als weiter mit
+    einem Stand arbeiten, dem niemand trauen kann.
+    """
+    existed = SCAN_FILE.exists()
+    SCAN_FILE.unlink(missing_ok=True)
+    return existed
+
+
 def iter_mails(scan):
     """Alle Mails eines Scans als (konto, ordner_eintrag, mail)."""
     for acc in scan.get("accounts", []):
@@ -814,26 +826,21 @@ def clean(scan, dry_run=True, force=False, progress=None):
 
 
 def _forget_moved(scan, acc, folder_name, part):
-    """Erledigte Mails aus dem Scan nehmen.
+    """Erledigte Mails aus dem Scan nehmen - und nur die.
 
-    Was wirklich weg ist, hat in der Liste nichts mehr zu suchen - sonst steht
-    nach dem Aufräumen alles unverändert da, als wäre nichts geschehen. Nur
-    markierte Mails bleiben stehen: sie liegen ja noch im Postfach.
+    Entfernt wird ausschließlich, was die Nachprüfung im Postfach nicht mehr
+    gefunden hat. Angehakt sein reicht nicht: übersprungene Mails (hinter der
+    Nummer steckt inzwischen eine andere) und nur markierte liegen weiter im
+    Postfach und müssen deshalb auch in der Liste stehen bleiben. Sonst sieht
+    die Liste sauberer aus als das Postfach - und genau das ist unbrauchbar.
     """
-    if not part["moved"]:
+    gone = set(part.get("moved_uids") or ())
+    if not gone:
         return
     for folder in acc.get("folders", []):
-        if folder["folder"] != folder_name:
-            continue
-        if part["flagged"] or part["failed"]:
-            # Es steht nicht fest, welche einzelne Mail weg ist und welche
-            # liegen blieb - dann lieber alles stehen lassen und beim nächsten
-            # Scan sauber neu feststellen, als die falschen zu entfernen.
-            for mail in folder.get("mails", []):
-                if mail.get("delete"):
-                    mail["moved_unclear"] = True
-            return
-        folder["mails"] = [m for m in folder.get("mails", []) if not m.get("delete")]
+        if folder["folder"] == folder_name:
+            folder["mails"] = [m for m in folder.get("mails", [])
+                               if m["uid"] not in gone]
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +914,14 @@ def cmd_konten(args):
 
 
 def cmd_scan(args):
+    if args.reset:
+        if clear_scan():
+            print(f"Gespeicherter Scan verworfen ({SCAN_FILE}).")
+        else:
+            print("Es lag kein Scan vor - nichts zu verwerfen.")
+        print("Neu einlesen mit:  python mail_cleanup.py scan")
+        return
+
     accounts = load_accounts()
     if not accounts:
         print("Noch keine Konten eingerichtet: python mail_cleanup.py konten --add")
@@ -1082,6 +1097,8 @@ def main():
     scan.add_argument("--min-age", type=int, metavar="TAGE",
                       help=f"Mails jünger als N Tage nie vorschlagen "
                            f"(Standard: {DEFAULT_SETTINGS['min_age_days']})")
+    scan.add_argument("--reset", action="store_true",
+                      help="Gespeicherten Scan verwerfen, ohne neu zu durchsuchen")
 
     toexcel = sub.add_parser("to-excel", help="Scan-Ergebnis als Excel-Liste ausgeben")
     toexcel.add_argument("--output", default="mail_aufraeumen.xlsx")

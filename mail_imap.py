@@ -519,17 +519,18 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
     hat damit noch nichts bewegt - und der Rückfallweg (kopieren + markieren)
     lässt die Mail bewusst liegen.
 
-    Gibt {"moved", "flagged", "failed", "skipped", "errors", "method", "log"}
-    zurück:
-      moved   - nachweislich nicht mehr im Ursprungsordner
-      flagged - kopiert und als gelöscht markiert, liegt aber noch da
-      failed  - Server meldete Erfolg, die Mail ist trotzdem noch da
+    Gibt {"moved", "moved_uids", "flagged", "failed", "skipped", "errors",
+    "method", "log"} zurück:
+      moved      - nachweislich nicht mehr im Ursprungsordner
+      moved_uids - welche das waren; nur diese dürfen aus dem Scan fallen
+      flagged    - kopiert und als gelöscht markiert, liegt aber noch da
+      failed     - Server meldete Erfolg, die Mail ist trotzdem noch da
 
     Bei dry_run wird der Ordner nur lesend geöffnet, es kann also gar nichts
     geschrieben werden.
     """
-    result = {"moved": 0, "flagged": 0, "failed": 0, "skipped": 0, "errors": 0,
-              "method": None, "log": []}
+    result = {"moved": 0, "moved_uids": [], "flagged": 0, "failed": 0,
+              "skipped": 0, "errors": 0, "method": None, "log": []}
 
     def note(message):
         result["log"].append(message)
@@ -619,10 +620,11 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
              f"{len(attempted)} Mails wirklich weg sind, ist damit ungeklärt.")
         return result
 
-    gone = len(attempted) - len(still_there)
-    result["moved"] += gone
+    gone = [u for u in attempted if u not in still_there]
+    result["moved_uids"].extend(gone)
+    result["moved"] += len(gone)
 
-    if method == "copy_flag":
+    if method == "copy_flag" and still_there:
         # Hier ist Liegenbleiben der Normalfall, kein Fehler.
         result["flagged"] += len(still_there)
         note(f"ACHTUNG: Server kann weder MOVE noch UID EXPUNGE. {len(still_there)} "
