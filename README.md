@@ -23,7 +23,7 @@ pip install -r requirements.txt
 python icloud_web.py
 ```
 
-Dann im Browser `http://127.0.0.1:5000` öffnen. Die Oberfläche bietet:
+Dann im Browser `http://127.0.0.1:8000` öffnen. Die Oberfläche bietet:
 
 - **Export** — ein Klick holt alle Kontakte inkl. Fotos aus iCloud, mit
   Fortschrittsbalken; danach als **VCF** oder direkt als **Excel** herunterladen.
@@ -40,11 +40,12 @@ Die App nutzt dieselbe Kernlogik wie das CLI und dieselben Zugangsdaten aus der
 `.env`-Datei bzw. den Umgebungsvariablen.
 
 > **Wo läuft das?**
-> - **GitHub Codespaces** (siehe unten): nach `python icloud_web.py` blendet
->   VS Code eine Meldung „Im Browser öffnen“ für Port 5000 ein — anklicken.
+> - **GitHub Codespaces** (siehe unten): nach `python icloud_web.py` im
+>   **PORTS**-Tab (unten neben „TERMINAL") auf den Link bei Port 8000 klicken -
+>   direkt dort klicken, nicht eine gespeicherte Adresse erneut aufrufen.
 > - **a-Shell auf dem iPhone**: App starten, dann in Safari auf demselben
->   Gerät `http://127.0.0.1:5000` öffnen.
-> - **Lokal am PC**: einfach den Browser auf `http://127.0.0.1:5000`.
+>   Gerät `http://127.0.0.1:8000` öffnen.
+> - **Lokal am PC**: einfach den Browser auf `http://127.0.0.1:8000`.
 >
 > Die App hat bewusst **keine Anmeldung** und ist nur für die lokale,
 > persönliche Nutzung gedacht. Den Port nicht öffentlich freigeben.

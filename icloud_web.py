@@ -8,7 +8,7 @@ bedienbar macht. Nutzt dieselbe, bewährte Kernlogik wie das CLI-Skript
 Start:
     pip install -r requirements.txt
     python icloud_web.py
-    -> Browser öffnen: http://127.0.0.1:5000
+    -> Browser öffnen: http://127.0.0.1:8000
 
 Zugangsdaten kommen wie beim CLI aus der .env-Datei oder aus
 Umgebungsvariablen (ICLOUD_USER / ICLOUD_PASS).
@@ -2148,7 +2148,11 @@ if __name__ == "__main__":
     # kommt dann nicht durch, obwohl der Prozess sauber läuft. 0.0.0.0 ist
     # GitHubs eigene Empfehlung für Codespaces und schadet lokal nicht.
     host = os.environ.get("HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", "5000"))
+    # 8000 statt Flasks üblichem 5000: in diesem Codespace blieb Port 5000
+    # in der Weiterleitung hängen (vermutlich wegen "onAutoForward":
+    # "openBrowser" im Devcontainer - der Browser öffnete sich, bevor die
+    # Weiterleitung/Anmeldung stand). 8000 hat sich als zuverlässig erwiesen.
+    port = int(os.environ.get("PORT", "8000"))
     print(f"iCloud Kontakte Sync - Web-Oberfläche")
     print(f"Öffne im Browser: http://127.0.0.1:{port}")
     print(f"E-Mail aufräumen:  http://127.0.0.1:{port}/mail")
