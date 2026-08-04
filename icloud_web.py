@@ -556,8 +556,8 @@ BASE_CSS = """
     --color-primary: #2563eb;
     --color-primary-hover: #1d4ed8;
     --color-primary-soft: #eff6ff;
-    --color-accent: #ea580c;
-    --color-accent-hover: #c2410c;
+    --color-accent: #c2410c;         /* #ea580c hatte nur 3.6:1 mit weißer Button-Schrift */
+    --color-accent-hover: #9a3412;
     --color-accent-soft: #fff7ed;
     --color-success: #16a34a;
     --color-success-soft: #f0fdf4;
@@ -573,7 +573,7 @@ BASE_CSS = """
     --color-surface-2: #f1f5f9;
     --color-border: #e2e8f0;
     --color-text: #0f172a;
-    --color-text-muted: #64748b;
+    --color-text-muted: #475569;     /* #64748b hatte nur 4.3:1 auf --color-surface-2 */
     --color-on-primary: #ffffff;
     --color-on-accent: #ffffff;
 
@@ -686,7 +686,7 @@ BASE_CSS = """
   .btn {
     font: inherit; font-weight: 600; font-size: .875rem;
     display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
-    min-height: 42px; padding: 0 1.1rem; border-radius: var(--radius-sm);
+    min-height: 42px; padding: .5rem 1.1rem; border-radius: var(--radius-sm);
     border: 1px solid transparent; cursor: pointer; text-decoration: none;
     transition: transform .12s var(--ease), background-color .15s var(--ease),
                 border-color .15s var(--ease), box-shadow .15s var(--ease), opacity .15s var(--ease);
@@ -701,7 +701,7 @@ BASE_CSS = """
   .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); box-shadow: 0 4px 14px rgba(37,99,235,.25); }
 
   .btn-accent { background: var(--color-accent); color: var(--color-on-accent); }
-  .btn-accent:hover:not(:disabled) { background: var(--color-accent-hover); box-shadow: 0 4px 14px rgba(234,88,12,.25); }
+  .btn-accent:hover:not(:disabled) { background: var(--color-accent-hover); box-shadow: 0 4px 14px rgba(194,65,12,.25); }
 
   .btn-secondary { background: var(--color-surface-2); color: var(--color-text); border-color: var(--color-border); }
   .btn-secondary:hover:not(:disabled) { background: var(--color-border); }
@@ -723,7 +723,7 @@ BASE_CSS = """
   .upload-row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: .6rem; }
   input[type=file] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
   .file-label {
-    display: inline-flex; align-items: center; gap: .5rem; min-height: 42px; padding: 0 1.1rem;
+    display: inline-flex; align-items: center; gap: .5rem; min-height: 42px; padding: .5rem 1.1rem;
     border-radius: var(--radius-sm); border: 1px dashed var(--color-border);
     background: var(--color-surface-2); color: var(--color-text); cursor: pointer;
     font-size: .875rem; font-weight: 600; transition: border-color .15s var(--ease), background-color .15s var(--ease);
@@ -1136,9 +1136,14 @@ function selectedTarget(){
 }
 
 async function startImport(dry){
+  if(!dry){
+    if(!confirm('Wirklich jetzt schreiben? Dabei können Kontakte angelegt, geändert oder gelöscht werden.')) return;
+    document.getElementById('btnReal').disabled = true;
+  }
   const r = await fetch('/api/import', {method:'POST', headers:{'Content-Type':'application/json'},
                         body: JSON.stringify({dry_run: dry, target: selectedTarget()})});
   if(r.ok){ setBusy(true); poll(); }
+  else if(!dry){ document.getElementById('btnReal').disabled = false; }
 }
 
 async function checkGoogleStatus(){
@@ -1953,6 +1958,13 @@ function noteRescan(){
 }
 function ruleForSender(sender, list, ev){
   ev.stopPropagation();
+  if(list === 'always_delete'){
+    if(!confirm(sender + ' wird ab jetzt bei jedem Scan automatisch zum Löschen vorgeschlagen, ' +
+        'bis du die Regel unter "Eigene Regeln" wieder entfernst. Fortfahren?')) return;
+    const card = document.getElementById('rulesCard');
+    card.classList.remove('collapsed');
+    card.querySelector('.card-head').setAttribute('aria-expanded', 'true');
+  }
   saveRule(list, sender);
 }
 
