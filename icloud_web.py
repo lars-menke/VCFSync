@@ -563,8 +563,10 @@ BASE_CSS = """
     --color-success-soft: #f0fdf4;
     --color-danger: #dc2626;
     --color-danger-soft: #fef2f2;
+    --color-danger-text: #b91c1c;    /* eigener Ton für Text auf -soft: 4.41:1 reichte nicht für WCAG AA */
     --color-warning: #d97706;
     --color-warning-soft: #fffbeb;
+    --color-warning-text: #92400e;   /* dito - 3.07:1 auf -soft war zu wenig */
 
     --color-bg: #f8fafc;
     --color-surface: #ffffff;
@@ -594,8 +596,10 @@ BASE_CSS = """
       --color-success-soft: rgba(74,222,128,.10);
       --color-danger: #f87171;
       --color-danger-soft: rgba(248,113,113,.10);
+      --color-danger-text: #fecaca;
       --color-warning: #fbbf24;
       --color-warning-soft: rgba(251,191,36,.10);
+      --color-warning-text: #fde68a;
 
       --color-bg: #0b1220;
       --color-surface: #131b2c;
@@ -734,7 +738,7 @@ BASE_CSS = """
   progress { width: 100%; height: 10px; border: none; border-radius: 999px; overflow: hidden;
              margin-top: .75rem; -webkit-appearance: none; appearance: none; }
   progress::-webkit-progress-bar { background: var(--color-surface-2); border-radius: 999px; }
-  progress::-webkit-progress-value { background: var(--color-primary); border-radius: 999px; transition: width .3s var(--ease); }
+  progress::-webkit-progress-value { background: var(--color-primary); border-radius: 999px; }
   progress::-moz-progress-bar { background: var(--color-primary); border-radius: 999px; }
   progress.indeterminate { background: var(--color-surface-2); position: relative; }
   progress.indeterminate::-webkit-progress-value { background: var(--color-primary); }
@@ -777,11 +781,12 @@ BASE_CSS = """
   .callout { display: flex; gap: .6rem; align-items: flex-start; padding: .75rem .9rem;
              border-radius: var(--radius-sm); font-size: .85rem; margin: .75rem 0; }
   .callout svg { width: 18px; height: 18px; flex: none; margin-top: .05rem; }
-  .callout-danger { background: var(--color-danger-soft); color: var(--color-danger); }
+  .callout-danger { background: var(--color-danger-soft); color: var(--color-danger-text); }
   .callout-info { background: var(--color-primary-soft); color: var(--color-primary); }
-  .callout-warn { background: var(--color-warning-soft); color: var(--color-warning); }
+  .callout-warn { background: var(--color-warning-soft); color: var(--color-warning-text); }
 
   .diag { margin: .5rem 0 1rem; }
+  .diag-table-wrap { overflow-x: auto; margin: 0 -1px; }
   .diag-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
   .diag-table th, .diag-table td { padding: .35rem .5rem; text-align: left;
                                    border-bottom: 1px solid var(--color-border); }
@@ -806,6 +811,12 @@ BASE_CSS = """
   @media (max-width: 480px) {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     body { padding: 1.5rem 1rem 3rem; }
+    /* Marke+Titel und die drei Nav-Links passen nicht mehr nebeneinander,
+       sobald "Suchen" als dritter Link dazukam - umbrechen statt die Seite
+       ueberbreit werden zu lassen. */
+    .topbar { flex-wrap: wrap; }
+    .nav { margin-left: 0; width: 100%; }
+    .nav a { flex: 1 1 auto; justify-content: center; }
   }
 
   /* --- Navigation zwischen Kontakten und E-Mail --- */
@@ -880,14 +891,14 @@ BASE_CSS = """
     display: inline-block; padding: .05rem .4rem; border-radius: 999px;
     font-size: .72rem; font-weight: 600;
   }
-  .pill-delete { background: #fee2e2; color: #b91c1c; }
-  .pill-unsure { background: #fef3c7; color: #92400e; }
+  .pill-delete { background: #fee2e2; color: var(--color-danger-text); }
+  .pill-unsure { background: #fef3c7; color: var(--color-warning-text); }
   .pill-keep { background: var(--color-primary-soft); color: var(--color-primary); }
   .pill-type { background: var(--color-surface-2); color: var(--color-text-muted);
                border: 1px solid var(--color-border); }
   @media (prefers-color-scheme: dark) {
-    .pill-delete { background: #7f1d1d; color: #fecaca; }
-    .pill-unsure { background: #78350f; color: #fde68a; }
+    .pill-delete { background: #7f1d1d; }
+    .pill-unsure { background: #78350f; }
   }
   :root[data-theme="dark"] .pill-delete { background: #7f1d1d; color: #fecaca; }
   :root[data-theme="dark"] .pill-unsure { background: #78350f; color: #fde68a; }
@@ -1176,7 +1187,7 @@ async function refresh(){
   if(j.kind === 'export'){
     document.getElementById('exportDone').classList.remove('hidden');
     let w = j.result.warnings && j.result.warnings.length
-      ? '<p class="hl-title">Warnungen</p><div class="hl">'+ highlightLog(j.result.warnings.join('\\n')) +'</div>' : '';
+      ? '<h3 class="hl-title">Warnungen</h3><div class="hl">'+ highlightLog(j.result.warnings.join('\\n')) +'</div>' : '';
     s.innerHTML = '<div class="card"><div class="status-head ok">'+ ICONS.ok +
       '<span class="status-title">Export fertig</span></div>' +
       '<p class="muted" style="margin:.35rem 0 0">'+ j.result.loaded +' Kontakte geladen, '+ j.result.photos +
@@ -1208,16 +1219,16 @@ async function refresh(){
 
 function renderTargetResult(label, res, showChanged){
   let hl = res.highlights && res.highlights.length
-    ? '<p class="hl-title">'+label+' – Details</p><div class="hl">'+ highlightLog(res.highlights.join('\\n')) +'</div>' : '';
+    ? '<h3 class="hl-title">'+label+' – Details</h3><div class="hl">'+ highlightLog(res.highlights.join('\\n')) +'</div>' : '';
   let changeList = (res.changes && res.changes.length)
-    ? '<p class="hl-title">'+label+' – geänderte Kontakte</p><div class="hl">'+ esc(res.changes.join('\\n')) +'</div>' : '';
+    ? '<h3 class="hl-title">'+label+' – geänderte Kontakte</h3><div class="hl">'+ esc(res.changes.join('\\n')) +'</div>' : '';
   let firstTile = showChanged
     ? '<div class="stat-tile"><div class="stat-value">'+res.changed+'</div><div class="stat-label">Geändert</div></div>'
     : '<div class="stat-tile"><div class="stat-value">'+res.updated+'</div><div class="stat-label">Aktualisiert</div></div>';
   let summary = showChanged
     ? res.updated+' aktualisiert (davon '+res.changed+' inhaltlich geändert), '+(res.unchanged||0)+' bereits aktuell (übersprungen).'
     : res.updated+' aktualisiert, '+(res.unchanged||0)+' bereits aktuell (übersprungen).';
-  return '<p class="hl-title" style="margin-top:1.1rem">'+label+'</p>' +
+  return '<h3 class="hl-title" style="margin-top:1.1rem">'+label+'</h3>' +
     '<div class="stat-grid">' + firstTile +
     '<div class="stat-tile"><div class="stat-value">'+res.created+'</div><div class="stat-label">Neu</div></div>' +
     '<div class="stat-tile'+(res.deleted?' stat-bad':'')+'"><div class="stat-value">'+res.deleted+'</div><div class="stat-label">Gelöscht</div></div>' +
@@ -1506,14 +1517,14 @@ async function diagnose(name){
   }
 
   box.innerHTML = head +
-    '<p class="hl-title">Ordner</p><table class="diag-table"><thead><tr>' +
+    '<h3 class="hl-title">Ordner</h3><div class="diag-table-wrap"><table class="diag-table"><thead><tr>' +
     '<th>Ordner</th><th class="num">Mails</th><th class="num">nur markiert</th></tr></thead><tbody>' +
     j.folders.map(f =>
       '<tr' + (f.deleted ? ' class="diag-hit"' : '') + '><td>' + esc(f.name) +
       (f.is_trash ? ' <span class="muted">(Papierkorb)</span>' : '') + '</td>' +
       '<td class="num">' + (f.error ? '?' : f.total) + '</td>' +
       '<td class="num">' + (f.error ? esc(f.error) : f.deleted) + '</td></tr>').join('') +
-    '</tbody></table>' +
+    '</tbody></table></div>' +
     '<p class="muted">„Nur markiert" heißt: als gelöscht gekennzeichnet, aber noch ' +
     'im Ordner. Stehen hier Zahlen, sind das genau die Mails, die im Mailprogramm ' +
     'noch auftauchen.</p>';
@@ -1560,10 +1571,10 @@ function renderFolderArea(accounts){
   if(!accounts.length){ area.innerHTML = '<p class="muted">Erst ein Konto anlegen.</p>'; return; }
   area.innerHTML = accounts.map(a =>
     '<div data-account="' + esc(a.name) + '">' +
-    '<p class="hl-title">' + esc(a.name) +
+    '<h3 class="hl-title">' + esc(a.name) +
     ' <button class="btn btn-secondary" onclick="loadFolders(\\'' + esc(a.name) + '\\')">Ordner laden</button>' +
     ' <button class="btn btn-secondary" onclick="setFolders(\\'' + esc(a.name) + '\\', true)">Alle</button>' +
-    ' <button class="btn btn-secondary" onclick="setFolders(\\'' + esc(a.name) + '\\', false)">Keine</button></p>' +
+    ' <button class="btn btn-secondary" onclick="setFolders(\\'' + esc(a.name) + '\\', false)">Keine</button></h3>' +
     '<div class="folder-list hidden" id="fl-' + esc(a.name) + '"></div></div>').join('');
 }
 async function loadFolders(name){
@@ -1878,7 +1889,7 @@ async function refresh(){
         ? '<div class="callout callout-info">' + I_OK +
           '<div>Sieht das gut aus? Dann auf „Wirklich in den Papierkorb" klicken.</div></div>'
         : '') +
-      (r.log.length ? '<p class="hl-title">Protokoll</p><div class="hl">' +
+      (r.log.length ? '<h3 class="hl-title">Protokoll</h3><div class="hl">' +
         esc(r.log.join('\\n')) + '</div>' : '') +
       '</div>';
     document.getElementById('btnRealClean').disabled = !r.dry_run || !r.moved;
@@ -1911,7 +1922,7 @@ function renderRules(rules){
     return;
   }
   area.innerHTML = names.map(n =>
-    '<p class="hl-title">' + RULE_LABELS[n] + '</p>' +
+    '<h3 class="hl-title">' + RULE_LABELS[n] + '</h3>' +
     rules[n].map(v =>
       '<div class="acc-row"><span class="acc-name">' + esc(v) + '</span>' +
       '<span class="acc-actions"><button class="btn btn-secondary" onclick="removeRule(\\'' +
@@ -2117,7 +2128,7 @@ function renderResult(r){
   const area = document.getElementById('resultArea');
   if(!hits.length){ area.innerHTML = ''; return; }
 
-  area.innerHTML = '<div class="card"><table class="diag-table"><thead><tr>' +
+  area.innerHTML = '<div class="card"><div class="diag-table-wrap"><table class="diag-table"><thead><tr>' +
     '<th>Datum</th><th>Konto</th><th>Ordner</th><th>Von</th><th>Betreff</th>' +
     '<th class="num">Größe</th><th>Kennzeichen</th></tr></thead><tbody>' +
     hits.map(h => {
@@ -2132,7 +2143,7 @@ function renderResult(r){
         '<td class="num">' + kb(h.size) + '</td>' +
         '<td class="muted">' + esc(flags.join(', ')) + '</td></tr>';
     }).join('') +
-    '</tbody></table></div>';
+    '</tbody></table></div></div>';
 }
 
 loadAccounts();
