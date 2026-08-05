@@ -871,6 +871,20 @@ BASE_CSS = """
   .diag-table th { color: var(--color-text-muted); font-weight: 600; }
   .diag-table .num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .diag-table .diag-hit td { background: var(--color-warning-soft); }
+  .diag-table tbody tr:hover td { background: var(--color-surface-2); }
+  .diag-table .diag-hit:hover td { background: var(--color-warning-soft); }
+  .diag-table td.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+                        white-space: nowrap; color: var(--color-text-muted); }
+  .diag-table .subj-cell {
+    display: inline-block; max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; vertical-align: bottom;
+  }
+  .diag-table .from-cell { border-bottom: 1px dotted var(--color-border); cursor: help; }
+  .diag-table .pill { margin: 0 .2rem .2rem 0; }
+  .result-context {
+    font-size: .82rem; color: var(--color-text-muted); margin: -.25rem 0 .8rem;
+    padding-left: .1rem;
+  }
 
   .hl {
     font-family: var(--font-mono); font-size: .78rem; line-height: 1.65;
@@ -1244,6 +1258,15 @@ async function refresh(){
   const r = await fetch('/api/status');
   const j = await r.json();
   const s = document.getElementById('status');
+  // Der Job-Status ist app-weit geteilt (nur eine Aufgabe gleichzeitig). Läuft
+  // z.B. gerade ein E-Mail-Scan oder hat er zuletzt etwas hinterlassen, gehört
+  // das nicht auf diese Seite - sonst bleibt hier ein falscher "Import
+  // abgeschlossen"/"läuft"-Status stehen, der nie wieder verschwindet, weil
+  // diese Seite ihn nicht gestartet hat und ihn deshalb auch nicht abfragt.
+  if(j.kind !== 'export' && j.kind !== 'import'){
+    s.innerHTML = ''; clearInterval(polling); polling = null; setBusy(false);
+    return;
+  }
   let pct = j.total ? Math.round(j.done/j.total*100) : 0;
   let indeterminate = !j.total;
 
@@ -2028,10 +2051,21 @@ function poll(){
 async function refresh(){
   const j = await jget('/api/status');
   const s = document.getElementById('status');
-  const busy = j.running && (j.kind === 'mailscan' || j.kind === 'mailclean');
+  const owned = j.kind === 'mailscan' || j.kind === 'mailclean';
 
+  // Job-Status ist app-weit geteilt (nur eine Aufgabe gleichzeitig). "Scan"
+  // trotzdem immer sperren, solange irgendetwas läuft - sonst könnte man hier
+  // draufklicken und käme prompt in den 409 einer anderen Seite. Anzeigen
+  // (Verlauf, Fehler, Ergebnis) aber nur, wenn der Job wirklich von dieser
+  // Seite gestartet wurde, sonst bleibt hier sonst ein fremder Fehler oder
+  // ein falsches "läuft"/"fertig" stehen, das nie wieder verschwindet.
   document.getElementById('btnScan').disabled = j.running;
-  if(busy){
+  if(!owned){
+    if(polling){ clearInterval(polling); polling = null; }
+    s.innerHTML = '';
+    return;
+  }
+  if(j.running){
     s.innerHTML = '<div class="card"><div class="status-head">' +
       '<span class="spinner"></span><span class="status-title">' +
       (j.kind === 'mailscan' ? 'Durchsuche Postfächer ...' : 'Räume auf ...') +
@@ -2313,10 +2347,16 @@ async function startSearch(){
 async function refresh(){
   const j = await jget('/api/status');
   const s = document.getElementById('status');
-  const busy = j.running && j.kind === 'mailsearch';
+  const owned = j.kind === 'mailsearch';
 
+  // Job-Status ist app-weit geteilt - siehe dieselbe Absicherung auf /mail.
   document.getElementById('btnSearch').disabled = j.running;
-  if(busy){
+  if(!owned){
+    if(polling){ clearInterval(polling); polling = null; }
+    s.innerHTML = '';
+    return;
+  }
+  if(j.running){
     s.innerHTML = '<div class="card"><div class="status-head">' +
       '<span class="spinner"></span><span class="status-title">Durchsuche Postfach ...</span>' +
       '</div><p class="muted">' + esc(j.message) + '</p></div>';
@@ -2332,6 +2372,16 @@ async function refresh(){
   renderResult(j.result);
 }
 
+const FLAG_LABELS = {seen: 'gelesen', answered: 'beantwortet', flagged: 'markiert',
+                     deleted: 'gelöscht markiert', draft: 'Entwurf'};
+function flagPills(flags){
+  return flags.map(f => {
+    const key = f.toLowerCase();
+    const cls = key === 'deleted' ? 'pill-delete' : 'pill-type';
+    return '<span class="pill ' + cls + '">' + esc(FLAG_LABELS[key] || f) + '</span>';
+  }).join('');
+}
+
 function renderResult(r){
   const s = document.getElementById('status');
   const hits = r.hits || [];
@@ -2344,22 +2394,46 @@ function renderResult(r){
   const area = document.getElementById('resultArea');
   if(!hits.length){ area.innerHTML = ''; return; }
 
-  area.innerHTML = '<div class="card"><div class="diag-table-wrap"><table class="diag-table"><thead><tr>' +
-    '<th>Datum</th><th>Konto</th><th>Ordner</th><th>Von</th><th>Betreff</th>' +
-    '<th class="num">Größe</th><th>Kennzeichen</th></tr></thead><tbody>' +
-    hits.map(h => {
-      const flags = (h.flags || []).map(f => f.replace('\\\\', ''));
-      const deleted = flags.some(f => f.toLowerCase() === 'deleted');
-      return '<tr' + (deleted ? ' class="diag-hit"' : '') + '>' +
-        '<td>' + esc((h.date || '').slice(0, 10)) + '</td>' +
-        '<td>' + esc(h.account) + '</td>' +
-        '<td>' + esc(h.folder) + (deleted ? ' <span class="muted">(als gelöscht markiert)</span>' : '') + '</td>' +
-        '<td>' + esc(h.from_name || h.from) + '</td>' +
-        '<td>' + esc(h.subject || '(kein Betreff)') + '</td>' +
-        '<td class="num">' + kb(h.size) + '</td>' +
-        '<td class="muted">' + esc(flags.join(', ')) + '</td></tr>';
-    }).join('') +
-    '</tbody></table></div></div>';
+  // Konto/Ordner nur als eigene Spalte, wenn sich das zwischen den Treffern
+  // überhaupt unterscheidet - sonst steht dasselbe Wort in jeder einzigen
+  // Zeile und nimmt dem eigentlich unterscheidenden Betreff den Platz weg.
+  const accounts = new Set(hits.map(h => h.account));
+  const folders = new Set(hits.map(h => h.folder));
+  const showAccount = accounts.size > 1;
+  const showFolder = folders.size > 1;
+  const anyFlags = hits.some(h => (h.flags || []).length);
+
+  const context = [];
+  if(!showAccount) context.push('Konto: <b>' + esc(hits[0].account) + '</b>');
+  if(!showFolder) context.push('Ordner: <b>' + esc(hits[0].folder) + '</b>');
+  const contextLine = context.length
+    ? '<p class="result-context">' + context.join(' · ') + '</p>' : '';
+
+  let head = '<th class="mono">Datum</th>';
+  if(showAccount) head += '<th>Konto</th>';
+  if(showFolder) head += '<th>Ordner</th>';
+  head += '<th>Von</th><th>Betreff</th><th class="num">Größe</th>';
+  if(anyFlags) head += '<th>Markierung</th>';
+
+  const rows = hits.map(h => {
+    const flags = (h.flags || []).map(f => f.replace('\\\\', ''));
+    const deleted = flags.some(f => f.toLowerCase() === 'deleted');
+    const subject = h.subject || '(kein Betreff)';
+    let row = '<tr' + (deleted ? ' class="diag-hit"' : '') + '>' +
+      '<td class="mono">' + esc((h.date || '').slice(0, 10)) + '</td>';
+    if(showAccount) row += '<td>' + esc(h.account) + '</td>';
+    if(showFolder) row += '<td>' + esc(h.folder) + '</td>';
+    row += '<td><span class="from-cell" title="' + esc(h.from) + '">' +
+      esc(h.from_name || h.from) + '</span></td>' +
+      '<td><span class="subj-cell" title="' + esc(subject) + '">' + esc(subject) + '</span></td>' +
+      '<td class="num">' + kb(h.size) + '</td>';
+    if(anyFlags) row += '<td>' + flagPills(flags) + '</td>';
+    return row + '</tr>';
+  }).join('');
+
+  area.innerHTML = '<div class="card">' + contextLine +
+    '<div class="diag-table-wrap"><table class="diag-table"><thead><tr>' + head +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
 }
 
 loadAccounts();
