@@ -643,6 +643,25 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
                  "als gelöscht markiert.")
         return result
 
+    # Vor dem Kopieren merken, wie voll der Papierkorb schon ist. Ein "OK" des
+    # Servers auf UID COPY heißt laut Protokoll, dass die Mail dort jetzt liegt -
+    # real antworten manche Server aber OK, ohne wirklich etwas abzulegen. Genau
+    # dieselbe Vorsicht wie bei MOVE, nur auf den Zielordner angewandt.
+    trash_count_before = None
+    if method == "copy_flag":
+        try:
+            trash_count_before, _ = folder_stats(conn, trash_folder)
+        except Exception:  # noqa: BLE001
+            trash_count_before = None
+        # folder_stats() hat trash_folder selektiert - zurück zum Quellordner,
+        # sonst laufen STORE/EXPUNGE gleich gegen den falschen Ordner.
+        typ, _ = conn.select(_quote(folder), readonly=False)
+        if typ != "OK":
+            result["errors"] += len(verified)
+            note(f"FEHLER: Ordner '{folder}' konnte nach der Papierkorb-Prüfung "
+                 "nicht wieder geöffnet werden.")
+            return result
+
     target = _quote(trash_folder)
     attempted = []
     for start in range(0, len(verified), FETCH_BATCH):
@@ -678,12 +697,32 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
     result["moved"] += len(gone)
 
     if method == "copy_flag" and still_there:
-        # Hier ist Liegenbleiben der Normalfall, kein Fehler.
-        result["flagged"] += len(still_there)
-        note(f"ACHTUNG: Server kann weder MOVE noch UID EXPUNGE. {len(still_there)} "
-             f"Mails wurden nach '{trash_folder}' KOPIERT und in '{folder}' nur als "
-             "gelöscht markiert - sie liegen dort weiter und viele Mailprogramme "
-             "zeigen sie ganz normal an.")
+        # Nachsehen statt glauben, Teil 2: nicht nur "liegt die Mail noch im
+        # Quellordner", sondern auch "ist im Papierkorb wirklich etwas Neues
+        # angekommen". Ein Server, der COPY faelschlich mit OK bestaetigt,
+        # wuerde sonst als Erfolg durchgehen, obwohl nichts kopiert wurde.
+        copy_confirmed = True
+        if trash_count_before is not None:
+            try:
+                trash_count_after, _ = folder_stats(conn, trash_folder)
+                if trash_count_after - trash_count_before < len(still_there):
+                    copy_confirmed = False
+            except Exception:  # noqa: BLE001
+                pass  # nicht nachpruefbar - im Zweifel wie gemeldet behandeln
+
+        if copy_confirmed:
+            # Hier ist Liegenbleiben der Normalfall, kein Fehler.
+            result["flagged"] += len(still_there)
+            note(f"ACHTUNG: Server kann weder MOVE noch UID EXPUNGE. {len(still_there)} "
+                 f"Mails wurden nach '{trash_folder}' KOPIERT und in '{folder}' nur als "
+                 "gelöscht markiert - sie liegen dort weiter und viele Mailprogramme "
+                 "zeigen sie ganz normal an.")
+        else:
+            result["failed"] += len(still_there)
+            note(f"FEHLER: Server hat das Kopieren von {len(still_there)} Mails nach "
+                 f"'{trash_folder}' mit OK bestätigt, dort ist aber nichts Neues "
+                 "angekommen. Vermutlich wurde nichts kopiert - die Mails sind "
+                 f"unverändert in '{folder}'. Bitte im Postfach von Hand nachsehen.")
     elif still_there:
         result["failed"] += len(still_there)
         note(f"FEHLER: {len(still_there)} Mails liegen trotz erfolgreicher "
