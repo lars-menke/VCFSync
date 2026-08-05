@@ -631,7 +631,10 @@ BASE_CSS = """
   }
   .page { max-width: 720px; margin-inline: auto; }
 
-  .topbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.9rem; }
+  /* flex-wrap: wenn Titel/Icon und die drei Nav-Pillen nicht mehr
+     nebeneinander passen, soll die ganze Nav-Zeile umbrechen - nicht das
+     Wort in einer einzelnen Pille (siehe .nav a white-space unten). */
+  .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-bottom: 1.9rem; }
   .brand-mark {
     width: 48px; height: 48px; flex: none; border-radius: 13px;
     background: linear-gradient(145deg, var(--color-primary), var(--color-accent));
@@ -852,10 +855,8 @@ BASE_CSS = """
   @media (max-width: 480px) {
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     body { padding: 1.5rem 1rem 3rem; }
-    /* Marke+Titel und die drei Nav-Links passen nicht mehr nebeneinander,
-       sobald "Suchen" als dritter Link dazukam - umbrechen statt die Seite
-       ueberbreit werden zu lassen. */
-    .topbar { flex-wrap: wrap; }
+    /* Auf schmalen Bildschirmen sollen die Pillen zusaetzlich die volle
+       Breite ausfuellen statt nur als kompakte Gruppe umzubrechen. */
     .nav { margin-left: 0; width: 100%; }
     .nav a { flex: 1 1 auto; justify-content: center; }
   }
@@ -865,7 +866,7 @@ BASE_CSS = """
   .nav a {
     display: inline-flex; align-items: center; gap: .4rem; text-decoration: none;
     padding: .45rem .85rem; border-radius: 8px; font-size: .88rem; font-weight: 500;
-    color: var(--color-text-muted); border: 1px solid transparent;
+    color: var(--color-text-muted); border: 1px solid transparent; white-space: nowrap;
   }
   .nav a:hover { background: var(--color-surface-alt); color: var(--color-text); }
   .nav a.active {
