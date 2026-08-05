@@ -553,12 +553,15 @@ BASE_CSS = """
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
 
-    --color-primary: #2563eb;
-    --color-primary-hover: #1d4ed8;
-    --color-primary-soft: #eff6ff;
-    --color-accent: #c2410c;         /* #ea580c hatte nur 3.6:1 mit weißer Button-Schrift */
-    --color-accent-hover: #9a3412;
-    --color-accent-soft: #fff7ed;
+    /* Petrol/Rost statt Standard-SaaS-Blau/Orange - siehe UI/UX-Review
+       (.impeccable/critique). Halbtöne (-hover/-soft) davon abgeleitet,
+       Kontrastwerte gegen die tatsächlichen Hintergründe nachgemessen. */
+    --color-primary: #0f6b63;        /* Petrol - 6.4:1 mit weißer Button-Schrift */
+    --color-primary-hover: #0b4a45;
+    --color-primary-soft: #e3efec;
+    --color-accent: #b8560e;         /* Rost - 4.8:1 mit weißer Button-Schrift */
+    --color-accent-hover: #8f4009;
+    --color-accent-soft: #fbede0;
     --color-success: #16a34a;
     --color-success-soft: #f0fdf4;
     --color-danger: #dc2626;
@@ -568,12 +571,12 @@ BASE_CSS = """
     --color-warning-soft: #fffbeb;
     --color-warning-text: #92400e;   /* dito - 3.07:1 auf -soft war zu wenig */
 
-    --color-bg: #f8fafc;
+    --color-bg: #f6f7f5;             /* Papier - kühles Off-White statt neutralem Grau */
     --color-surface: #ffffff;
-    --color-surface-2: #f1f5f9;
-    --color-border: #e2e8f0;
-    --color-text: #0f172a;
-    --color-text-muted: #475569;     /* #64748b hatte nur 4.3:1 auf --color-surface-2 */
+    --color-surface-2: #edf1ef;
+    --color-border: #dce3e0;
+    --color-text: #1b2430;           /* Tinte statt reinem Schwarz */
+    --color-text-muted: #55666a;     /* ≈6:1 auf --color-surface-2/--color-bg */
     --color-on-primary: #ffffff;
     --color-on-accent: #ffffff;
 
@@ -586,12 +589,12 @@ BASE_CSS = """
 
   @media (prefers-color-scheme: dark) {
     :root {
-      --color-primary: #3b82f6;
-      --color-primary-hover: #60a5fa;
-      --color-primary-soft: rgba(59,130,246,.12);
-      --color-accent: #fb923c;
-      --color-accent-hover: #fdba74;
-      --color-accent-soft: rgba(251,146,60,.12);
+      --color-primary: #4fbbae;
+      --color-primary-hover: #6fcfc3;
+      --color-primary-soft: #1d3936;
+      --color-accent: #e08a48;
+      --color-accent-hover: #eda36c;
+      --color-accent-soft: #3a2a1b;
       --color-success: #4ade80;
       --color-success-soft: rgba(74,222,128,.10);
       --color-danger: #f87171;
@@ -601,12 +604,12 @@ BASE_CSS = """
       --color-warning-soft: rgba(251,191,36,.10);
       --color-warning-text: #fde68a;
 
-      --color-bg: #0b1220;
-      --color-surface: #131b2c;
-      --color-surface-2: #1a2337;
-      --color-border: #253048;
-      --color-text: #e6ebf5;
-      --color-text-muted: #8b96ac;
+      --color-bg: #161c22;
+      --color-surface: #1e262d;
+      --color-surface-2: #222a31;
+      --color-border: #2c363d;
+      --color-text: #eaedec;
+      --color-text-muted: #93a3a2;
       --color-on-primary: #0b1220;
       --color-on-accent: #0b1220;
       --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 1px 16px rgba(0,0,0,.25);
@@ -623,20 +626,20 @@ BASE_CSS = """
     margin: 0;
     padding: 2rem 1.25rem 4rem;
     line-height: 1.55;
-    font-size: 15px;
+    font-size: 16px;
     -webkit-font-smoothing: antialiased;
   }
   .page { max-width: 720px; margin-inline: auto; }
 
-  .topbar { display: flex; align-items: center; gap: .9rem; margin-bottom: 1.75rem; }
+  .topbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.9rem; }
   .brand-mark {
-    width: 44px; height: 44px; flex: none; border-radius: 12px;
+    width: 48px; height: 48px; flex: none; border-radius: 13px;
     background: linear-gradient(145deg, var(--color-primary), var(--color-accent));
     display: flex; align-items: center; justify-content: center;
     box-shadow: var(--shadow-card);
   }
-  .brand-mark svg { width: 24px; height: 24px; color: #fff; }
-  h1 { font-size: 1.3rem; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  .brand-mark svg { width: 26px; height: 26px; color: #fff; }
+  h1 { font-size: 2rem; font-weight: 700; margin: 0; letter-spacing: -.015em; line-height: 1.15; }
   .sub { color: var(--color-text-muted); margin: .15rem 0 0; font-size: .875rem; }
   .sub strong { color: var(--color-text); font-weight: 600; }
 
@@ -650,6 +653,44 @@ BASE_CSS = """
     animation: rise .35s var(--ease) both;
   }
   @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* --- Ablauf-Rail: verbundene, zustandsbehaftete Schritte statt loser,
+     gleichwertiger Karten. Reihenfolge trägt hier echte Bedeutung (Konto vor
+     Scan vor Prüfen vor Aufräumen), deshalb eine Linie mit Zustandspunkten
+     statt sechs optisch identischer Karten. */
+  .rail { position: relative; padding-left: 1.9rem; margin-bottom: 1.25rem; }
+  .rail::before {
+    content: ""; position: absolute; left: 8px; top: 10px; bottom: 10px; width: 1.5px;
+    background: var(--color-border);
+  }
+  .rail-step {
+    position: relative; background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: var(--radius); box-shadow: var(--shadow-card);
+    padding: 1.25rem 1.4rem; margin-bottom: .9rem;
+    animation: rise .35s var(--ease) both;
+  }
+  .rail-step::before {
+    content: ""; position: absolute; left: -1.9rem; top: 1.4rem; width: 17px; height: 17px;
+    border-radius: 50%; background: var(--color-surface); border: 2px solid var(--color-border);
+    transition: background-color .2s var(--ease), border-color .2s var(--ease), box-shadow .2s var(--ease);
+  }
+  .rail-step.done::before { background: var(--color-primary); border-color: var(--color-primary); }
+  .rail-step.active::before { border-color: var(--color-primary); box-shadow: 0 0 0 4px var(--color-primary-soft); }
+  .rail-head { display: flex; align-items: flex-start; gap: .75rem; cursor: pointer; user-select: none; }
+  .rail-step.done .rail-title { color: var(--color-text-muted); font-weight: 500; }
+  .rail-summary { font-size: .85rem; color: var(--color-text-muted); margin: .15rem 0 0; min-height: 1.3em; }
+  .rail-fold {
+    margin-left: auto; flex: none; width: 20px; height: 20px; align-self: center;
+    color: var(--color-text-muted); transition: transform .2s var(--ease);
+  }
+  .rail-step.collapsed .rail-fold { transform: rotate(-90deg); }
+  .rail-step.collapsed .rail-body { display: none; }
+  .rail-step .rail-body { margin-top: 1.15rem; }
+  @media (max-width: 480px) {
+    .rail { padding-left: 1.5rem; }
+    .rail::before { left: 6px; }
+    .rail-step::before { left: -1.5rem; }
+  }
 
   .card-head { display: flex; align-items: flex-start; gap: .75rem; margin-bottom: 1.1rem; }
   .card-head.foldable { cursor: pointer; user-select: none; }
@@ -666,7 +707,7 @@ BASE_CSS = """
     display: flex; align-items: center; justify-content: center;
   }
   .card-icon svg { width: 18px; height: 18px; }
-  .card h2 { font-size: 1rem; font-weight: 600; margin: .1rem 0 .2rem; }
+  .card h2, .rail-title { font-size: 1.25rem; font-weight: 600; margin: .1rem 0 .2rem; letter-spacing: -.005em; }
   .card .muted.desc { margin: 0; }
 
   .muted { color: var(--color-text-muted); font-size: .85rem; }
@@ -698,10 +739,10 @@ BASE_CSS = """
   .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
 
   .btn-primary { background: var(--color-primary); color: var(--color-on-primary); }
-  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); box-shadow: 0 4px 14px rgba(37,99,235,.25); }
+  .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); box-shadow: 0 4px 14px rgba(15,107,99,.25); }
 
   .btn-accent { background: var(--color-accent); color: var(--color-on-accent); }
-  .btn-accent:hover:not(:disabled) { background: var(--color-accent-hover); box-shadow: 0 4px 14px rgba(194,65,12,.25); }
+  .btn-accent:hover:not(:disabled) { background: var(--color-accent-hover); box-shadow: 0 4px 14px rgba(184,86,14,.25); }
 
   .btn-secondary { background: var(--color-surface-2); color: var(--color-text); border-color: var(--color-border); }
   .btn-secondary:hover:not(:disabled) { background: var(--color-border); }
@@ -774,7 +815,7 @@ BASE_CSS = """
     border-radius: var(--radius-sm); padding: .75rem .5rem; text-align: center;
   }
   .stat-tile.stat-bad { background: var(--color-danger-soft); border-color: var(--color-danger); }
-  .stat-value { font-size: 1.5rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat-value { font-family: var(--font-mono); font-size: 1.4rem; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
   .stat-label { font-size: .72rem; color: var(--color-text-muted); margin-top: .25rem;
                 text-transform: uppercase; letter-spacing: .04em; }
 
@@ -791,7 +832,7 @@ BASE_CSS = """
   .diag-table th, .diag-table td { padding: .35rem .5rem; text-align: left;
                                    border-bottom: 1px solid var(--color-border); }
   .diag-table th { color: var(--color-text-muted); font-weight: 600; }
-  .diag-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .diag-table .num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .diag-table .diag-hit td { background: var(--color-warning-soft); }
 
   .hl {
@@ -1273,118 +1314,138 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
     des jeweiligen Kontos und lassen sich dort zurückholen.</div>
   </div>
 
-  <div class="card">
-    <div class="card-head">
-      <div class="card-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
-        </svg>
-      </div>
-      <div>
-        <h2>1 · Postfächer</h2>
-        <p class="muted desc">IMAP-Konten mit app-spezifischem Passwort. Die Zugangsdaten
-           bleiben lokal in <code>mail_accounts.json</code>.</p>
-      </div>
-    </div>
-    <div id="accountList"></div>
-    <button class="btn btn-secondary" onclick="toggleAccountForm()">Konto hinzufügen</button>
-    <div id="accountForm" class="hidden">
-      <div class="form-grid">
-        <label>Anzeigename<input id="accName" placeholder="iCloud"></label>
-        <label>Anbieter
-          <select id="accPreset" onchange="applyPreset()">
-            <option value="">eigener Server</option>
-          </select>
-        </label>
-        <label>IMAP-Server<input id="accHost" placeholder="imap.mail.me.com"></label>
-        <label>Port<input id="accPort" value="993"></label>
-        <label>Benutzername<input id="accUser" placeholder="name@icloud.com"></label>
-        <label>Passwort<input id="accPass" type="password" placeholder="app-spezifisch"></label>
-      </div>
-      <button class="btn btn-primary" onclick="addAccount()">Speichern und testen</button>
-      <p id="accInfo" class="muted"></p>
-    </div>
-  </div>
+  <div class="rail">
 
-  <div class="card">
-    <div class="card-head">
-      <div class="card-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
-        </svg>
+    <div class="rail-step active" id="railStep1">
+      <div class="rail-head" onclick="toggleRailStep(1)" role="button" tabindex="0"
+           aria-expanded="true" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRailStep(1);}">
+        <div class="card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="rail-title">Postfächer</h2>
+          <p class="rail-summary" id="railSum1">IMAP-Konten mit app-spezifischem Passwort. Die Zugangsdaten
+             bleiben lokal in <code>mail_accounts.json</code>.</p>
+        </div>
+        <svg class="rail-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
       </div>
-      <div>
-        <h2>2 · Durchsuchen</h2>
-        <p class="muted desc">Ordner auswählen und bewerten lassen. Dabei wird
-           ausschließlich gelesen - es wird nichts verändert.</p>
+      <div class="rail-body">
+        <div id="accountList"></div>
+        <button class="btn btn-secondary" onclick="toggleAccountForm()">Konto hinzufügen</button>
+        <div id="accountForm" class="hidden">
+          <div class="form-grid">
+            <label>Anzeigename<input id="accName" placeholder="iCloud"></label>
+            <label>Anbieter
+              <select id="accPreset" onchange="applyPreset()">
+                <option value="">eigener Server</option>
+              </select>
+            </label>
+            <label>IMAP-Server<input id="accHost" placeholder="imap.mail.me.com"></label>
+            <label>Port<input id="accPort" value="993"></label>
+            <label>Benutzername<input id="accUser" placeholder="name@icloud.com"></label>
+            <label>Passwort<input id="accPass" type="password" placeholder="app-spezifisch"></label>
+          </div>
+          <button class="btn btn-primary" onclick="addAccount()">Speichern und testen</button>
+          <p id="accInfo" class="muted"></p>
+        </div>
       </div>
     </div>
-    <div id="folderArea" class="muted">Erst ein Konto anlegen.</div>
-    <div class="form-grid" style="max-width:240px">
-      <label>Mindestalter in Tagen
-        <input id="minAge" type="number" min="0" value="30">
-      </label>
-    </div>
-    <button id="btnScan" class="btn btn-primary" onclick="startScan()">
-      Ausgewählte Ordner durchsuchen
-    </button>
-  </div>
 
-  <div class="card">
-    <div class="card-head">
-      <div class="card-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>
-        </svg>
+    <div class="rail-step" id="railStep2">
+      <div class="rail-head" onclick="toggleRailStep(2)" role="button" tabindex="0"
+           aria-expanded="true" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRailStep(2);}">
+        <div class="card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="rail-title">Durchsuchen</h2>
+          <p class="rail-summary" id="railSum2">Ordner auswählen und bewerten lassen. Dabei wird
+             ausschließlich gelesen - es wird nichts verändert.</p>
+        </div>
+        <svg class="rail-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
       </div>
-      <div>
-        <h2>3 · Prüfen</h2>
-        <p class="muted desc">Vorgeschlagene Mails abhaken - hier im Browser oder
-           bequemer in Excel. Vorangehakt ist nur, was deutlich weg kann.</p>
+      <div class="rail-body">
+        <div id="folderArea" class="muted">Erst ein Konto anlegen.</div>
+        <div class="form-grid" style="max-width:240px">
+          <label>Mindestalter in Tagen
+            <input id="minAge" type="number" min="0" value="30">
+          </label>
+        </div>
+        <button id="btnScan" class="btn btn-primary" onclick="startScan()">
+          Ausgewählte Ordner durchsuchen
+        </button>
       </div>
     </div>
-    <div class="download-row">
-      <a href="/api/mail/download/xlsx" class="btn btn-secondary">Als Excel herunterladen</a>
-      <label class="file-label" for="mailFile">Bearbeitete Excel hochladen</label>
-      <input type="file" id="mailFile" accept=".xlsx" onchange="uploadExcel()">
-      <button class="btn btn-secondary" onclick="discardScan()">Liste verwerfen</button>
-    </div>
-    <p id="uploadInfo" class="muted"></p>
-    <fieldset class="target-group" id="sortBox" style="display:none">
-      <legend class="muted">Sortierung</legend>
-      <label class="target-option">
-        <input type="radio" name="sortMode" value="count" checked onchange="renderGroups()"> nach Absender
-      </label>
-      <label class="target-option">
-        <input type="radio" name="sortMode" value="size" onchange="renderGroups()"> nach Größe
-      </label>
-      <label class="target-option">
-        <input type="radio" name="sortMode" value="attachment" onchange="renderGroups()"> nur mit Anhang
-      </label>
-    </fieldset>
-    <div id="resultArea"><p class="muted">Noch kein Scan vorhanden.</p></div>
-  </div>
 
-  <div class="card">
-    <div class="card-head">
-      <div class="card-icon">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-        </svg>
+    <div class="rail-step" id="railStep3">
+      <div class="rail-head" onclick="toggleRailStep(3)" role="button" tabindex="0"
+           aria-expanded="true" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRailStep(3);}">
+        <div class="card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="rail-title">Prüfen</h2>
+          <p class="rail-summary" id="railSum3">Vorgeschlagene Mails abhaken - hier im Browser oder
+             bequemer in Excel. Vorangehakt ist nur, was deutlich weg kann.</p>
+        </div>
+        <svg class="rail-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
       </div>
-      <div>
-        <h2>4 · Aufräumen</h2>
-        <p class="muted desc">Erst der Testlauf, dann wirklich verschieben.</p>
+      <div class="rail-body">
+        <div class="download-row">
+          <a href="/api/mail/download/xlsx" class="btn btn-secondary">Als Excel herunterladen</a>
+          <label class="file-label" for="mailFile">Bearbeitete Excel hochladen</label>
+          <input type="file" id="mailFile" accept=".xlsx" onchange="uploadExcel()">
+          <button class="btn btn-secondary" onclick="discardScan()">Liste verwerfen</button>
+        </div>
+        <p id="uploadInfo" class="muted"></p>
+        <fieldset class="target-group" id="sortBox" style="display:none">
+          <legend class="muted">Sortierung</legend>
+          <label class="target-option">
+            <input type="radio" name="sortMode" value="count" checked onchange="renderGroups()"> nach Absender
+          </label>
+          <label class="target-option">
+            <input type="radio" name="sortMode" value="size" onchange="renderGroups()"> nach Größe
+          </label>
+          <label class="target-option">
+            <input type="radio" name="sortMode" value="attachment" onchange="renderGroups()"> nur mit Anhang
+          </label>
+        </fieldset>
+        <div id="resultArea"><p class="muted">Noch kein Scan vorhanden.</p></div>
       </div>
     </div>
-    <div class="button-row">
-      <button class="btn btn-secondary" onclick="startClean(true)">
-        Testlauf (nichts wird verschoben)
-      </button>
-      <button id="btnRealClean" class="btn btn-accent" onclick="startClean(false)" disabled>
-        Wirklich in den Papierkorb
-      </button>
+
+    <div class="rail-step" id="railStep4">
+      <div class="rail-head" onclick="toggleRailStep(4)" role="button" tabindex="0"
+           aria-expanded="true" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRailStep(4);}">
+        <div class="card-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="rail-title">Aufräumen</h2>
+          <p class="rail-summary" id="railSum4">Erst der Testlauf, dann wirklich verschieben.</p>
+        </div>
+        <svg class="rail-fold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+      <div class="rail-body">
+        <div class="button-row">
+          <button class="btn btn-secondary" onclick="startClean(true)">
+            Testlauf (nichts wird verschoben)
+          </button>
+          <button id="btnRealClean" class="btn btn-accent" onclick="startClean(false)" disabled>
+            Wirklich in den Papierkorb
+          </button>
+        </div>
+      </div>
     </div>
+
   </div>
 
   <div id="status" aria-live="polite"></div>
@@ -1489,6 +1550,13 @@ async function loadAccounts(){
       '<div class="diag hidden" id="diag-' + esc(a.name) + '"></div>').join('');
   }
   renderFolderArea(j.accounts);
+  if(j.accounts.length){
+    setRailState(1, 'done', j.accounts.length === 1 ? '1 Konto verbunden'
+      : j.accounts.length + ' Konten verbunden');
+  } else {
+    setRailState(1, 'active', '');
+  }
+  refreshRailChain();
 }
 
 /* ---------- Postfach prüfen ----------
@@ -1605,6 +1673,39 @@ function toggleCard(head){
   head.setAttribute('aria-expanded', String(!collapsed));
 }
 
+/* ---------- Ablauf-Rail: Zustand je Schritt ----------
+   Nur Schritte mit einem klaren Ja/Nein-Abschlusssignal (Konto vorhanden,
+   Scan geladen) klappen automatisch ein - Prüfen und Aufräumen bleiben immer
+   offen, weil es dort kein "fertig" gibt, nur "gerade dran". Ein Nutzer, der
+   einen erledigten Schritt von Hand wieder aufklappt, bekommt keinen
+   automatischen Rückfall - erst ein erneuter Zustandswechsel überschreibt das. */
+function toggleRailStep(n){
+  const el = document.getElementById('railStep' + n);
+  const collapsed = el.classList.toggle('collapsed');
+  el.dataset.userOpened = collapsed ? '' : '1';
+  el.querySelector('.rail-head').setAttribute('aria-expanded', String(!collapsed));
+}
+function setRailState(n, state, summary){
+  const el = document.getElementById('railStep' + n);
+  el.classList.remove('done', 'active');
+  if(state) el.classList.add(state);
+  if(summary !== undefined) document.getElementById('railSum' + n).textContent = summary;
+  if(state === 'done' && !el.dataset.userOpened){
+    el.classList.add('collapsed');
+    el.querySelector('.rail-head').setAttribute('aria-expanded', 'false');
+  } else if(state !== 'done'){
+    el.classList.remove('collapsed');
+    el.querySelector('.rail-head').setAttribute('aria-expanded', 'true');
+  }
+}
+function refreshRailChain(){
+  const step1Done = document.getElementById('railStep1').classList.contains('done');
+  const step2Done = document.getElementById('railStep2').classList.contains('done');
+  const reached = step1Done && step2Done;
+  setRailState(3, reached ? 'active' : '');
+  setRailState(4, reached ? 'active' : '');
+}
+
 /* ---------- Scan ---------- */
 async function startScan(){
   const byAccount = {};
@@ -1638,8 +1739,11 @@ async function discardScan(){
   document.getElementById('sortBox').style.display = 'none';
   document.getElementById('uploadInfo').textContent = '';
   document.getElementById('resultArea').innerHTML =
-    '<p class="muted">Liste verworfen. Oben unter „2 · Durchsuchen" neu einlesen.</p>';
+    '<p class="muted">Liste verworfen. Oben unter „Durchsuchen" neu einlesen.</p>';
   document.getElementById('btnRealClean').disabled = true;
+  const step1Done = document.getElementById('railStep1').classList.contains('done');
+  setRailState(2, step1Done ? 'active' : '', '');
+  refreshRailChain();
 }
 
 async function loadResult(){
@@ -1648,6 +1752,10 @@ async function loadResult(){
   if(j.error){
     area.innerHTML = '<p class="muted">' + esc(j.error) + '</p>';
     document.getElementById('sortBox').style.display = 'none';
+    groupData = []; summaryData = null;
+    const step1Done = document.getElementById('railStep1').classList.contains('done');
+    setRailState(2, step1Done ? 'active' : '', '');
+    refreshRailChain();
     return;
   }
   groupData = j.groups;
@@ -1657,6 +1765,8 @@ async function loadResult(){
   groupData.forEach(g => g.mails.forEach(m => { if(m.delete) selected.add(m.key); }));
   document.getElementById('sortBox').style.display = groupData.length ? '' : 'none';
   renderGroups();
+  setRailState(2, 'done', summaryData.total + ' Mails geprüft, ' + summaryData.delete + ' vorgeschlagen');
+  refreshRailChain();
 }
 
 function sortMode(){
@@ -1691,7 +1801,7 @@ function renderGroups(){
     html += '<div class="callout callout-warn">' + I_WARN + '<div>Diese Liste ist ' +
       'vom ' + esc(stamp(scanInfo.created)) + ' und wurde nach dem Aufräumen ' +
       '(' + esc(stamp(scanInfo.executed)) + ') <b>nicht neu eingelesen</b> — sie ' +
-      'kann vom Postfach abweichen. Oben unter „2 · Durchsuchen" neu einlesen ' +
+      'kann vom Postfach abweichen. Oben unter „Durchsuchen" neu einlesen ' +
       'oder die Liste verwerfen.</div></div>';
   } else if(scanInfo.created){
     html += '<p class="muted">Stand: ' + esc(stamp(scanInfo.created)) + '</p>';
