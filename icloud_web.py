@@ -311,6 +311,25 @@ def _run_mail_clean(dry_run):
         _job_finish(error=str(e))
 
 
+def _run_mail_purge(account_name, dry_run):
+    try:
+        account = mc.account_by_name(account_name)
+        results = mc.purge_flagged_account(
+            account, dry_run=dry_run,
+            progress=lambda message: _job_progress(0, 0, message))
+        log = []
+        for folder, r in results.items():
+            log.extend(f"{folder}: {line}" for line in r["log"])
+        _job_finish(result={
+            "kind": "purge", "dry_run": dry_run,
+            "before": sum(r["before"] for r in results.values()),
+            "purged": sum(r["purged"] for r in results.values()),
+            "folders": len(results), "log": log,
+        })
+    except Exception as e:  # noqa: BLE001
+        _job_finish(error=str(e))
+
+
 def _run_mail_search(selection, criteria):
     try:
         result = mc.search_mails(
@@ -511,6 +530,21 @@ def api_mail_upload():
 def api_mail_clean():
     dry_run = bool((request.json or {}).get("dry_run", True))
     if not _start("mailclean", _run_mail_clean, dry_run):
+        return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
+    return jsonify({"started": True})
+
+
+@app.route("/api/mail/purge", methods=["POST"])
+def api_mail_purge():
+    """Bereits als gelöscht markierte Mails endgültig entfernen - OHNE Kopie im
+    Papierkorb. Bewusst getrennt von /api/mail/clean, für Server, bei denen das
+    Kopieren dorthin nicht funktioniert (siehe move_to_trash()-Nachprüfung)."""
+    data = request.json or {}
+    account = data.get("account", "")
+    if not account:
+        return jsonify({"error": "Bitte ein Konto angeben."}), 400
+    dry_run = bool(data.get("dry_run", True))
+    if not _start("mailpurge", _run_mail_purge, account, dry_run):
         return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
     return jsonify({"started": True})
 
@@ -1501,6 +1535,7 @@ MAIL_PAGE = _head("E-Mail aufräumen") + """
 
 <script>
 let polling = null;
+let purgePolling = null;
 let selected = new Set();
 let presets = {};
 
@@ -1590,6 +1625,18 @@ async function diagnose(name){
       'Ordner ist.</div></div>';
   }
 
+  const totalMarked = j.folders.reduce((s, f) => s + (f.deleted || 0), 0);
+  const purgeSection = totalMarked ? (
+    '<div class="callout callout-danger">' + I_WARN + '<div>' +
+    '<b>' + totalMarked + ' Mails sind schon markiert, liegen aber ohne Kopie im ' +
+    'Papierkorb da.</b> Damit sie nicht dauerhaft so liegen bleiben, lassen sie ' +
+    'sich hier endgültig entfernen — ohne Papierkorb, nicht rückgängig zu machen.' +
+    '</div></div>' +
+    '<button class="btn btn-accent" onclick="purgeAccount(\\'' + esc(name) + '\\', ' +
+    totalMarked + ')">Markierte Mails endgültig entfernen</button>' +
+    '<div id="purge-' + esc(name) + '"></div>'
+  ) : '';
+
   box.innerHTML = head +
     '<h3 class="hl-title">Ordner</h3><div class="diag-table-wrap"><table class="diag-table"><thead><tr>' +
     '<th>Ordner</th><th class="num">Mails</th><th class="num">nur markiert</th></tr></thead><tbody>' +
@@ -1601,7 +1648,49 @@ async function diagnose(name){
     '</tbody></table></div>' +
     '<p class="muted">„Nur markiert" heißt: als gelöscht gekennzeichnet, aber noch ' +
     'im Ordner. Stehen hier Zahlen, sind das genau die Mails, die im Mailprogramm ' +
-    'noch auftauchen.</p>';
+    'noch auftauchen.</p>' + purgeSection;
+}
+
+/* ---------- Markierte Mails endgültig entfernen ----------
+   Bewusst getrennt vom normalen Aufräumen: nur für Server, bei denen das
+   Kopieren in den Papierkorb nicht funktioniert und Mails sonst dauerhaft
+   nur markiert liegen bleiben. Ohne Sicherheitskopie, nicht rückgängig. */
+async function purgeAccount(name, total){
+  if(!confirm(total + ' bereits markierte Mails in "' + name + '" werden JETZT ' +
+      'ENDGÜLTIG entfernt - ohne Kopie im Papierkorb. Das lässt sich nicht ' +
+      'rückgängig machen. Fortfahren?')) return;
+  const box = document.getElementById('purge-' + name);
+  const res = await jpost('/api/mail/purge', {account: name, dry_run: false});
+  if(!res.ok){ box.innerHTML = '<p class="l-err">Fehler: ' + esc(res.data.error) + '</p>'; return; }
+  pollPurge(name);
+}
+function pollPurge(name){
+  if(purgePolling) clearInterval(purgePolling);
+  purgePolling = setInterval(() => refreshPurge(name), 700);
+  refreshPurge(name);
+}
+async function refreshPurge(name){
+  const box = document.getElementById('purge-' + name);
+  if(!box) { clearInterval(purgePolling); purgePolling = null; return; }
+  const j = await jget('/api/status');
+  if(j.running){
+    box.innerHTML = '<p class="muted"><span class="spinner"></span> ' +
+      esc(j.message || 'Entferne ...') + '</p>';
+    return;
+  }
+  clearInterval(purgePolling); purgePolling = null;
+  if(j.error){ box.innerHTML = '<p class="l-err">Fehler: ' + esc(j.error) + '</p>'; return; }
+  if(!j.result || j.result.kind !== 'purge') return;
+  const r = j.result;
+  const note = '<div class="callout callout-info">' + I_OK + '<div>' +
+    r.purged + ' von ' + r.before + ' markierten Mails in ' + r.folders +
+    ' Ordner(n) endgültig entfernt.</div></div>' +
+    (r.log.length ? '<div class="hl">' + r.log.map(esc).join('<br>') + '</div>' : '');
+  // Nachsehen statt glauben, auch in der Anzeige: die Tabelle wird komplett neu
+  // geladen (zeigt die jetzt echten Zahlen), die Erfolgsmeldung bleibt oben stehen.
+  await diagnose(name);
+  const outer = document.getElementById('diag-' + name);
+  if(outer) outer.insertAdjacentHTML('afterbegin', note);
 }
 function toggleAccountForm(){
   document.getElementById('accountForm').classList.toggle('hidden');
@@ -1963,6 +2052,10 @@ async function refresh(){
       '<p class="muted">' + j.result.total + ' Mails geprüft, ' + j.result.delete +
       ' vorgeschlagen. Bitte unten prüfen.</p></div>';
     loadResult();
+  } else if(j.result.kind !== 'clean'){
+    // z.B. 'purge' - hat seinen eigenen Anzeigebereich (siehe refreshPurge()),
+    // gehört nicht hierhin.
+    s.innerHTML = '';
   } else {
     const r = j.result;
     const flagged = r.flagged || 0, failed = r.failed || 0;

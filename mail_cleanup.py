@@ -10,7 +10,9 @@ Ablauf ist bewusst derselbe wie beim Kontakte-Sync:
 
 Grundsätze:
   * **Nichts wird endgültig gelöscht.** Mails wandern in den Papierkorb des
-    Kontos und können dort zurückgeholt werden.
+    Kontos und können dort zurückgeholt werden. Einzige, bewusst separate
+    Ausnahme: "leeren" (siehe unten) - nur für Mails, die schon markiert sind,
+    weil der Server keine funktionierende Kopie in den Papierkorb schafft.
   * **Der Testlauf ist der Standard.** Ein echter Lauf braucht --execute.
   * **Bewertet wird fast ausschließlich anhand von Kopfzeilen.** Eine eng
     begrenzte Ausnahme: Mails, die sonst automatisch angehakt würden und bei
@@ -217,6 +219,44 @@ def diagnose_account(account, progress=None):
                 "deleted": deleted, "is_trash": name == trash, "error": error,
             })
         return out
+    finally:
+        mi.close(conn)
+
+
+def purge_flagged_account(account, folders=None, dry_run=True, progress=None):
+    """purge_flagged() über mehrere Ordner eines Kontos.
+
+    folders=None -> automatisch alle Ordner des Kontos, die laut Diagnose
+    bereits markierte Mails haben. So lässt sich "räum den ganzen Rückstand
+    auf" mit einem Aufruf erledigen, ohne dass man vorher jeden betroffenen
+    Ordner einzeln kennen und angeben müsste.
+
+    Gibt {ordnername: {"before", "purged", "log"}} zurück - nur für Ordner,
+    in denen tatsächlich etwas markiert war (before > 0).
+    """
+    conn = connect_account(account)
+    try:
+        if folders is None:
+            folders = []
+            for name, flags in mi.list_folders(conn):
+                if "\\noselect" in [f.lower() for f in flags]:
+                    continue
+                try:
+                    _total, deleted = mi.folder_stats(conn, name)
+                except Exception:  # noqa: BLE001 - ein sperriger Ordner blockiert nicht die anderen
+                    continue
+                if deleted:
+                    folders.append(name)
+
+        results = {}
+        for name in folders:
+            if progress:
+                verb = "zähle" if dry_run else "entferne"
+                progress(f"{account['name']} / {name}: {verb} markierte Mails ...")
+            r = mi.purge_flagged(conn, name, dry_run=dry_run)
+            if r["before"]:
+                results[name] = r
+        return results
     finally:
         mi.close(conn)
 
@@ -1325,6 +1365,50 @@ def cmd_diagnose(args):
                   f"{folder['deleted']:>24}{mark}")
 
 
+def cmd_leeren(args):
+    """Bereits markierte Mails endgültig entfernen - OHNE Kopie im Papierkorb.
+
+    Für Server, bei denen 'diagnose' copy_flag zeigt UND der Papierkorb trotz
+    Aufräumen leer bleibt: das Kopieren funktioniert dort nicht, die Mails
+    bleiben sonst dauerhaft nur markiert liegen. Testlauf ist der Standard,
+    wie überall in diesem Werkzeug.
+    """
+    accounts = load_accounts()
+    if args.account:
+        accounts = [account_by_name(args.account)]
+    if not accounts:
+        print("Noch keine Konten eingerichtet.")
+        return
+    dry_run = not args.execute
+    if dry_run:
+        print("Testlauf - es wird nichts entfernt. Mit --execute wirklich löschen.\n")
+    else:
+        print("ACHTUNG: Entfernt bereits markierte Mails ENDGÜLTIG, ohne Kopie im")
+        print("Papierkorb. Das ist NICHT rückgängig zu machen.\n")
+
+    total_before = total_purged = 0
+    for account in accounts:
+        results = purge_flagged_account(
+            account, folders=args.ordner, dry_run=dry_run,
+            progress=lambda m: print(f"  {m}", flush=True))
+        if not results:
+            print(f"{account['name']}: keine markierten Mails gefunden.")
+            continue
+        for folder, r in results.items():
+            for line in r["log"]:
+                print(f"{account['name']} / {folder}: {line}")
+            total_before += r["before"]
+            total_purged += r["purged"]
+
+    if dry_run:
+        if total_before:
+            hint = f" --account {args.account}" if args.account else ""
+            print(f"\n{total_before} bereits markierte Mails gefunden. Wirklich entfernen:")
+            print(f"  python mail_cleanup.py leeren --execute{hint}")
+    else:
+        print(f"\n{total_purged} Mails endgültig entfernt.")
+
+
 def cmd_suche(args):
     """Postfach durchsuchen - rein lesend, über alle Ordner (auch
     Papierkorb/Spam), egal was das Aufräumen selbst ausschließt."""
@@ -1468,6 +1552,16 @@ def main():
                          "der Papierkorb? (nur lesend)")
     diagnose.add_argument("--account", metavar="NAME", help="Nur dieses Konto")
 
+    leeren = sub.add_parser(
+        "leeren", help="Bereits als gelöscht markierte Mails endgültig entfernen - "
+                       "OHNE Kopie im Papierkorb, nicht rückgängig zu machen")
+    leeren.add_argument("--account", metavar="NAME", help="Nur dieses Konto")
+    leeren.add_argument("--ordner", action="append", metavar="NAME",
+                        help="Nur diese Ordner (mehrfach angebbar; Standard: "
+                             "alle mit markierten Mails)")
+    leeren.add_argument("--execute", action="store_true",
+                        help="Wirklich entfernen (ohne diese Angabe nur Testlauf/Zählung)")
+
     suche = sub.add_parser(
         "suche", help="Postfach durchsuchen - über ALLE Ordner, auch Papierkorb "
                       "und Spam (nur lesend)")
@@ -1484,7 +1578,8 @@ def main():
     args = parser.parse_args()
     handlers = {"konten": cmd_konten, "scan": cmd_scan, "to-excel": cmd_to_excel,
                 "from-excel": cmd_from_excel, "clean": cmd_clean, "regeln": cmd_regeln,
-                "gelernt": cmd_gelernt, "diagnose": cmd_diagnose, "suche": cmd_suche}
+                "gelernt": cmd_gelernt, "diagnose": cmd_diagnose, "leeren": cmd_leeren,
+                "suche": cmd_suche}
     try:
         handlers[args.cmd](args)
     except RuntimeError as e:

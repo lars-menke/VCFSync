@@ -730,6 +730,69 @@ def move_to_trash(conn, folder, items, trash_folder, expected_uidvalidity=None,
     return result
 
 
+def purge_flagged(conn, folder, dry_run=True):
+    """Bereits als gelöscht markierte Mails (\\Deleted) in `folder` endgültig
+    entfernen - OHNE Sicherheitskopie irgendwo.
+
+    Für Server ohne MOVE/UIDPLUS ist das die einzige Möglichkeit, den
+    Rückfallweg von move_to_trash() zu Ende zu bringen: dort werden Mails
+    bewusst NIE selbst per EXPUNGE entfernt (siehe dortiger Kommentar - ein
+    blankes EXPUNGE räumt jede markierte Mail im Ordner weg, nicht nur die vom
+    Werkzeug selbst markierten). Diese Funktion macht genau das trotzdem,
+    aber als eigene, bewusst gewählte Aktion statt als Nebenwirkung eines
+    "verschieben".
+
+    NICHT rückgängig zu machen. Markiert selbst nichts neu - nur was schon
+    markiert ist, wird entfernt.
+
+    Gibt {"before", "purged", "log"} zurück. Bei dry_run wird nur gezählt.
+    """
+    result = {"before": 0, "purged": 0, "log": []}
+
+    def note(message):
+        result["log"].append(message)
+
+    typ, _ = conn.select(_quote(folder), readonly=dry_run)
+    if typ != "OK":
+        note(f"FEHLER: Ordner '{folder}' konnte nicht geöffnet werden.")
+        return result
+
+    typ, data = conn.uid("SEARCH", None, "DELETED")
+    if typ != "OK":
+        note(f"FEHLER: Suche nach markierten Mails in '{folder}' fehlgeschlagen.")
+        return result
+    marked = (data[0] or b"").split()
+    result["before"] = len(marked)
+    if not marked:
+        return result
+
+    if dry_run:
+        note(f"(Testlauf) WÜRDE {len(marked)} bereits markierte Mails in "
+             f"'{folder}' endgültig entfernen - ohne Kopie im Papierkorb.")
+        return result
+
+    typ, _ = conn.expunge()
+    if typ != "OK":
+        note(f"FEHLER: Endgültiges Entfernen in '{folder}' fehlgeschlagen.")
+        return result
+
+    # Nachsehen statt glauben, auch hier: wirklich zählen, was noch da ist,
+    # statt dem Server-OK blind die volle Anzahl zu glauben.
+    typ, data = conn.uid("SEARCH", None, "DELETED")
+    remaining = len((data[0] or b"").split()) if typ == "OK" else None
+    if remaining is None:
+        result["purged"] = len(marked)
+        note(f"{len(marked)} markierte Mails in '{folder}' endgültig entfernt "
+             "(Nachprüfung fehlgeschlagen, ungeprüft übernommen).")
+    else:
+        result["purged"] = max(0, len(marked) - remaining)
+        note(f"{result['purged']} markierte Mails in '{folder}' endgültig entfernt.")
+        if remaining:
+            note(f"FEHLER: {remaining} weiterhin als gelöscht markierte Mails "
+                 f"liegen trotzdem noch in '{folder}'.")
+    return result
+
+
 METHOD_DE = {
     "move": "verschieben",
     "copy_expunge": "kopieren und im Ordner entfernen",

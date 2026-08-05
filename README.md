@@ -364,6 +364,7 @@ python mail_cleanup.py scan --account iCloud --folder INBOX --folder "Archiv 202
 python mail_cleanup.py scan --min-age 365               # nur Mails ab 1 Jahr
 python mail_cleanup.py diagnose                         # Postfach prüfen (nur lesend)
 python mail_cleanup.py scan --reset                     # gespeicherte Liste verwerfen
+python mail_cleanup.py leeren --account iCloud --execute  # s. "Im Mailprogramm ist nichts passiert"
 ```
 
 ### Die Liste ist eine Momentaufnahme
@@ -542,11 +543,28 @@ weder `MOVE` noch gezieltes `UID EXPUNGE`. Das Tool kann die Mail dann nur in
 den Papierkorb *kopieren* und im Ordner als gelöscht *markieren* — sie bleibt
 liegen, und viele Mailprogramme zeigen sie ganz normal weiter an. Solche Mails
 erscheinen in der Diagnose in der Spalte „davon gelöscht-markiert" und im
-Ergebnis als **„Nur markiert"**, nicht als verschoben.
+Ergebnis als **„Nur markiert"**, nicht als verschoben. Das Kopieren in den
+Papierkorb wird dabei selbst noch einmal nachgeprüft (steht dort danach
+wirklich etwas Neues?) — meldet der Server das Kopieren fälschlich als
+Erfolg, obwohl nichts ankam, zeigt das Ergebnis stattdessen **„Noch da"**.
 
 *Was hilft:* im Mailprogramm „Ordner aufräumen" bzw. „Gelöschte endgültig
-entfernen". Ein blankes `EXPUNGE` setzt das Tool bewusst nicht ab — das würde
+entfernen". Ein blankes `EXPUNGE` setzt `clean()` bewusst nicht ab — das würde
 auch Mails endgültig löschen, die man selbst irgendwann mal markiert hat.
+
+Für genau diesen einen Fall gibt es trotzdem einen eigenen, bewusst separaten
+Befehl, der die schon markierten Mails direkt aus dem Tool entfernt:
+
+```bash
+python mail_cleanup.py leeren --account iCloud   # zählt nur, testlauf
+python mail_cleanup.py leeren --account iCloud --execute   # entfernt wirklich
+```
+
+Im Browser erscheint bei „Postfach prüfen" derselbe Knopf, sobald markierte
+Mails gefunden wurden. **Achtung:** Anders als beim normalen Aufräumen gibt es
+hier keine Kopie im Papierkorb — nur bereits markierte Mails werden erfasst
+(es wird nichts neu markiert), aber ihr Entfernen ist endgültig und nicht
+rückgängig zu machen.
 
 **2. Der Papierkorb ist ein anderer Ordner als gedacht.** Nennt der Server
 seinen Papierkorb nicht selbst, rät das Tool über bekannte Namen. Die Diagnose
