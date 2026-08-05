@@ -1341,7 +1341,12 @@ function renderTargetResult(label, res, showChanged){
 }
 
 checkGoogleStatus();
-refresh();
+// poll() statt refresh(): laeuft beim Laden bereits ein Export/Import (weil
+// man waehrenddessen auf einen anderen Reiter gewechselt und ist zurueck-
+// gekommen), zeigt refresh() allein nur eine einmalige Momentaufnahme, die nie
+// wieder aktualisiert wird - das Ergebnis kaeme dann nie an. poll() haengt
+// sich dagegen wieder in den laufenden Job ein, bis er fertig ist.
+poll();
 </script>
 </body>
 </html>
@@ -2223,7 +2228,10 @@ loadAccounts();
 loadResult();
 loadRules();
 loadLearned();
-refresh();
+// poll() statt refresh(): siehe Kommentar am Seitenende von "/" - sonst
+// bliebe ein beim Reiterwechsel unterbrochener Scan/Aufräumen-Fortschritt
+// als eingefrorene Momentaufnahme stehen, ohne je das Ergebnis zu zeigen.
+poll();
 </script>
 </body>
 </html>
@@ -2437,6 +2445,9 @@ function renderResult(r){
 }
 
 loadAccounts();
+// poll() statt nichts: siehe Kommentar am Seitenende von "/" - sonst bliebe
+// eine beim Reiterwechsel unterbrochene Suche für immer ohne Ergebnis.
+poll();
 </script>
 </body>
 </html>
