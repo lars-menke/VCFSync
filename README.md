@@ -9,6 +9,10 @@ aktualisiert (keine Duplikate), neue Kontakte werden angelegt.
 Für den bequemen Alltag gibt es zusätzlich eine **Web-Oberfläche** mit Buttons
 (siehe unten), die Export und Import ohne Kommandozeile erledigt.
 
+Dazu gehört inzwischen auch ein **E-Mail-Aufräumtool** für IMAP-Postfächer
+(iCloud, Gmail und beliebige weitere) — siehe
+[E-Mail aufräumen](#e-mail-aufräumen).
+
 ## Web-Oberfläche (empfohlen)
 
 Statt die Befehle einzeln einzutippen, lässt sich alles per Knopfdruck über
@@ -19,7 +23,7 @@ pip install -r requirements.txt
 python icloud_web.py
 ```
 
-Dann im Browser `http://127.0.0.1:5000` öffnen. Die Oberfläche bietet:
+Dann im Browser `http://127.0.0.1:8000` öffnen. Die Oberfläche bietet:
 
 - **Export** — ein Klick holt alle Kontakte inkl. Fotos aus iCloud, mit
   Fortschrittsbalken; danach als **VCF** oder direkt als **Excel** herunterladen.
@@ -31,16 +35,21 @@ Dann im Browser `http://127.0.0.1:5000` öffnen. Die Oberfläche bietet:
 - **Löschen** — in der Excel-Liste ein `x` in die Spalte `Löschen` setzen; der
   Import entfernt diese Kontakte dann aus iCloud. Der Testlauf zeigt vorher
   deutlich an, wie viele gelöscht würden.
+- **Prüfen** — Kontakte direkt auf iCloud und/oder Google live auf bekannte
+  Inkonsistenzen prüfen (z.B. eine Handynummer, die nicht als „mobil"
+  gelabelt ist), mit Ampel-Anzeige — siehe
+  [Kontakte prüfen: Plausibilitätscheck](#kontakte-prüfen-plausibilitätscheck).
 
 Die App nutzt dieselbe Kernlogik wie das CLI und dieselben Zugangsdaten aus der
 `.env`-Datei bzw. den Umgebungsvariablen.
 
 > **Wo läuft das?**
-> - **GitHub Codespaces** (siehe unten): nach `python icloud_web.py` blendet
->   VS Code eine Meldung „Im Browser öffnen“ für Port 5000 ein — anklicken.
+> - **GitHub Codespaces** (siehe unten): nach `python icloud_web.py` im
+>   **PORTS**-Tab (unten neben „TERMINAL") auf den Link bei Port 8000 klicken -
+>   direkt dort klicken, nicht eine gespeicherte Adresse erneut aufrufen.
 > - **a-Shell auf dem iPhone**: App starten, dann in Safari auf demselben
->   Gerät `http://127.0.0.1:5000` öffnen.
-> - **Lokal am PC**: einfach den Browser auf `http://127.0.0.1:5000`.
+>   Gerät `http://127.0.0.1:8000` öffnen.
+> - **Lokal am PC**: einfach den Browser auf `http://127.0.0.1:8000`.
 >
 > Die App hat bewusst **keine Anmeldung** und ist nur für die lokale,
 > persönliche Nutzung gedacht. Den Port nicht öffentlich freigeben.
@@ -189,6 +198,59 @@ ICLOUD_USER=lars@icloud.com
 ICLOUD_PASS=xxxx-xxxx-xxxx-xxxx
 ```
 
+## Kontakte prüfen: Plausibilitätscheck
+
+Prüft Kontakte **live direkt auf iCloud und/oder Google** auf bekannte
+Inkonsistenzen — liest nur, verändert nichts. Gedacht, um vor einem großen
+Aufräumen (siehe oben) schnell zu sehen, wo überhaupt etwas zu tun ist,
+ohne die komplette Liste in Excel durchscrollen zu müssen.
+
+Geprüft wird je Kontakt:
+
+- Telefonnummer sieht nach einer deutschen Handynummer aus (015x/016x/017x),
+  ist aber nicht als „mobil" gelabelt (Fehler).
+- Telefon-Label ist uneindeutig ("Sonstige") (Hinweis).
+- Telefonnummer/E-Mail ist strukturell unplausibel — keine Ziffern, kein `@`
+  usw. (Fehler).
+- Telefonnummer/E-Mail kommt am selben Kontakt doppelt vor (Hinweis).
+- Adresse ohne erkennbare 5-stellige PLZ (Hinweis).
+- Anzeigename vorhanden, aber Vor- und Nachname beide leer (Hinweis).
+
+**In der Web-Oberfläche** (Karte „3 · Prüfen" auf der Kontakte-Seite): Konto
+wählen (iCloud, Google oder beide — Google erfordert vorher einmalig
+`google-auth`, siehe unten), auf „Kontakte prüfen" klicken. Das Ergebnis
+erscheint als Tabelle mit **Ampel-Status** (🟢 OK / 🟡 Hinweis / 🔴 Fehler) je
+Kontakt, dazu Zähler und zwei Downloads: die komplette Liste als Excel, oder
+**nur die auffälligen Kontakte** — spart das Laden der ganzen Datenbank, wenn
+nur wenige Einträge betroffen sind.
+
+**Auf der Kommandozeile:**
+
+```bash
+# iCloud prüfen, Ergebnis nur im Terminal
+python icloud_contacts.py pruefen
+
+# Beide Konten prüfen, zusätzlich als Excel mit Ampel-Farben speichern
+python icloud_contacts.py pruefen --konto beide --output pruefung.xlsx
+
+# Nur die auffälligen Kontakte in die Excel-Datei aufnehmen
+python icloud_contacts.py pruefen --konto beide --output pruefung.xlsx --nur-fehler
+```
+
+Dieselbe Prüfung lässt sich auch auf eine bereits exportierte VCF anwenden,
+ganz ohne Live-Verbindung — `to-excel` unterstützt dieselbe `--nur-fehler`-
+Option:
+
+```bash
+python icloud_contacts.py to-excel --input export.vcf --output kontakte.xlsx --nur-fehler
+```
+
+In der Excel-Datei stehen die Ampel-Spalten `Prüfung` (OK/Hinweis/Fehler,
+farbig hinterlegt) und `Hinweise` (Klartext-Begründung) direkt neben `UID`
+und `Löschen`. Sie sind rein informativ — beim Zurückwandeln mit
+`from-excel` werden sie ignoriert, ein Reimport älterer Excel-Dateien ohne
+diese Spalten funktioniert unverändert weiter.
+
 ## Google Contacts Sync (optional)
 
 Dieselbe (bearbeitete) VCF lässt sich zusätzlich zu iCloud auch nach Google
@@ -287,6 +349,328 @@ nicht als „aktualisiert". Das spart bei großen Beständen fast alle
 Schreibzugriffe, wenn seit dem letzten Sync nur wenige Kontakte geändert
 wurden, und schont Googles Schreib-Quota entsprechend.
 
+## E-Mail aufräumen
+
+Durchsucht ausgewählte IMAP-Postfächer und -Ordner, bewertet jede Mail nach
+festen Regeln und schlägt begründet vor, was weg kann. Gedacht für Postfächer,
+in denen jahrelang alles nur einsortiert und nie gelöscht wurde.
+
+**Nichts wird endgültig gelöscht** — Mails wandern in den **Papierkorb** des
+jeweiligen Kontos und lassen sich dort zurückholen. Der Testlauf ist überall
+der Standard, ein echter Lauf braucht eine ausdrückliche Bestätigung.
+
+Bewertet wird fast ausschließlich anhand von **Kopfzeilen** (Absender, Betreff,
+Datum, Newsletter-Kennzeichen). Eine eng begrenzte Ausnahme: Für die
+automatische Rechnungs-/Behördenerkennung wird bei einer kleinen Minderheit von
+Mails ein kurzer Textausschnitt gegengelesen (Details unten). Alles läuft
+lokal; es wird nichts an einen Dienst gesendet.
+
+### Postfächer einrichten
+
+Für iCloud und Gmail wird ein **app-spezifisches Passwort** gebraucht, nicht das
+normale Kennwort:
+
+- **iCloud** — [appleid.apple.com](https://appleid.apple.com) → Anmeldung und
+  Sicherheit → App-spezifische Passwörter. Server: `imap.mail.me.com:993`
+- **Gmail** — in den Google-Kontoeinstellungen IMAP aktivieren und ein
+  App-Passwort erzeugen. Server: `imap.gmail.com:993`
+- **Andere Anbieter** — Server und Port stehen beim jeweiligen Anbieter;
+  für GMX, web.de und Outlook sind Voreinstellungen hinterlegt.
+
+Anlegen entweder im Browser (Seite **E-Mail**, Karte „Postfächer") oder:
+
+```bash
+python mail_cleanup.py konten --add      # fragt alles ab, testet die Verbindung
+python mail_cleanup.py konten            # vorhandene Konten anzeigen
+python mail_cleanup.py konten --test     # alle Konten auf Erreichbarkeit prüfen
+```
+
+Die Zugangsdaten landen in `mail_accounts.json` — lokal und via `.gitignore`
+vom Commit ausgeschlossen.
+
+### Ablauf
+
+Im Browser: `python icloud_web.py` starten und oben rechts auf **E-Mail**
+wechseln. Dort führen die vier Karten der Reihe nach durch Postfächer →
+Durchsuchen → Prüfen → Aufräumen.
+
+Auf der Kommandozeile derselbe Ablauf:
+
+```bash
+# 1. Postfächer durchsuchen und bewerten (nur lesend)
+python mail_cleanup.py scan
+
+# 2. Als Excel-Liste zum Prüfen ausgeben
+python mail_cleanup.py to-excel
+
+# 3. In Excel die Spalte "Löschen" prüfen, dann zurücklesen
+python mail_cleanup.py from-excel --input mail_aufraeumen.xlsx
+
+# 4. Testlauf - es wird nichts verschoben
+python mail_cleanup.py clean
+
+# 5. Wirklich in den Papierkorb
+python mail_cleanup.py clean --execute
+```
+
+Einzelne Konten oder Ordner gezielt ansprechen:
+
+```bash
+python mail_cleanup.py konten --folders iCloud          # Ordner auflisten
+python mail_cleanup.py scan --account iCloud --folder INBOX --folder "Archiv 2023"
+python mail_cleanup.py scan --min-age 365               # nur Mails ab 1 Jahr
+python mail_cleanup.py diagnose                         # Postfach prüfen (nur lesend)
+python mail_cleanup.py scan --reset                     # gespeicherte Liste verwerfen
+python mail_cleanup.py leeren --account iCloud --execute  # s. "Im Mailprogramm ist nichts passiert"
+```
+
+### Die Liste ist eine Momentaufnahme
+
+Was unter „3 · Prüfen" steht, stammt aus dem letzten Durchsuchen — es ist kein
+Live-Blick ins Postfach. Nach einem echten Aufräumlauf hat sich das Postfach
+verändert, die Liste also nicht mehr. Sie zeigt dann oben einen Hinweis mit dem
+Stand und bittet ums Neueinlesen.
+
+Aus der Liste fallen nur Mails, bei denen nach dem Verschieben nachgesehen wurde
+und die tatsächlich verschwunden sind. Übersprungene und nur markierte Mails
+bleiben stehen — sie liegen ja auch noch im Postfach.
+
+Passt die Liste trotzdem einmal nicht mehr zum Postfach, hilft **Liste
+verwerfen** in Karte 3 bzw. `python mail_cleanup.py scan --reset` und danach
+neu durchsuchen. Am Postfach ändert das nichts; es wird nur der gespeicherte
+Stand weggeworfen.
+
+### Wonach bewertet wird
+
+Eine Mail wird **nie** vorgeschlagen, wenn sie markiert (Flagge) ist, du darauf
+geantwortet hast, es ein Entwurf ist, oder sie jünger als das Mindestalter
+(Standard 30 Tage) ist. Papierkorb, Entwürfe, Gesendet und Spam werden gar
+nicht erst durchsucht.
+
+Ansonsten zählen: Alter, Newsletter- und Massenmail-Kennzeichen
+(`List-Unsubscribe`, `List-Id`, `Precedence: bulk`), automatische Absender
+(`noreply@`, `notifications@` …), ob die Mail gelesen wurde, und die Größe.
+
+Zusätzlich gilt eine **Voranhak-Sperre**: Was jünger als ein Jahr ist, wird von
+der Punktebewertung nie von selbst angehakt — höchstens als „unklar" gezeigt.
+Sonst summieren sich Einzelsignale zu einem Vorschlag, obwohl die Mail noch
+recht frisch ist. Ausgenommen sind ausdrückliche Anweisungen: eigene Regeln und
+Gelerntes wirken schon ab dem Mindestalter von 30 Tagen.
+
+So urteilt das Tool damit:
+
+| Beispiel | Urteil |
+|---|---|
+| Newsletter, 1 Jahr alt oder älter | **vorangehakt** |
+| Automatischer Absender, ab 2 Jahren | **vorangehakt** |
+| Newsletter, 40 Tage alt | unklar |
+| Automatischer Absender, 18 Monate | unklar |
+| Persönliche Post, egal wie alt | nie vorangehakt |
+
+Alles Grenzwertige erscheint als „unklar" und muss selbst angekreuzt werden.
+
+### Anhänge und Speicherplatz
+
+Beim Durchsuchen wird miterfasst, ob eine Mail einen **Anhang** hat und wie er
+heißt. Eingebettete Bilder aus HTML-Newslettern zählen dabei bewusst nicht als
+Anhang — die tragen zwar einen Dateinamen, sind aber keine Anlage im
+gemeinten Sinn.
+
+Anhänge fließen **nicht** in die Bewertung ein: ob eine Mail wertvoll ist, sagt
+ein Anhang nicht — die alte Rechnung genauso wenig wie die Urlaubsfotos. Sie
+werden nur sichtbar gemacht, damit du selbst entscheiden kannst.
+
+In der Web-Oberfläche lässt sich die Liste umschalten zwischen *nach Absender*,
+*nach Größe* und *nur mit Anhang*; eine Kachel zeigt laufend, wie viel die
+aktuelle Auswahl freigibt. In Excel gibt es die Spalten `Anhang` und
+`Anhangnamen`, sortieren geht dort über den Autofilter.
+
+### Eigene Regeln
+
+Neben dem Gelernten lassen sich feste Regeln pflegen. Sie stehen **über** dem
+Gelernten, aber **unter** den Schutzregeln — eine markierte oder ganz frische
+Mail wird auch dann nicht vorgeschlagen, wenn ihr Absender auf „immer löschen"
+steht.
+
+| Liste | Wirkung |
+|---|---|
+| nie löschen (Absender) | wird nie vorgeschlagen |
+| immer löschen (Absender) | wird vorgeschlagen |
+| nie löschen (Betreff enthält) | wird nie vorgeschlagen |
+| eher löschen (Betreff enthält) | starkes Signal, entscheidet aber nicht allein |
+
+Bei Absendern ist neben der genauen Adresse auch `*@domain.de` erlaubt.
+Betreffregeln sind einfache Teiltextsuchen ohne Groß-/Kleinschreibung — bewusst
+keine regulären Ausdrücke.
+
+Am bequemsten legst du Regeln direkt beim Durchsehen an: neben jedem Absender
+stehen in der Ergebnisliste zwei kleine Knöpfe **immer** und **nie**. Sonst:
+
+```bash
+python mail_cleanup.py regeln                              # anzeigen
+python mail_cleanup.py regeln --immer '*@werbung.de'
+python mail_cleanup.py regeln --nie 'chef@firma.de'
+python mail_cleanup.py regeln --betreff-immer 'Ihre Bestellung'
+python mail_cleanup.py regeln --betreff-nie 'Rechnung'
+python mail_cleanup.py regeln --remove 'chef@firma.de'
+```
+
+Gespeichert wird das in `mail_rules.json` (nicht im Git). Nach einer Änderung
+muss neu durchsucht werden, damit sie greift.
+
+### Mail-Typ-Erkennung: Rechnungen und Bank-/Behördenpost
+
+Zwei Typen werden automatisch erkannt und **nie von selbst angehakt** — egal
+wie eindeutig Alter, Absender oder Punkte sonst für „löschen" sprächen:
+
+| Typ | Woran erkannt |
+|---|---|
+| Rechnung / Bestellung | Betreff enthält z.B. „Rechnung", „Bestellbestätigung", „Quittung", „Lieferschein" |
+| Bank / Versicherung / Behörde | Absender-Domain (z.B. `*sparkasse*`, `*versicherung*`, `finanzamt.*`) oder Betreff (z.B. „Kontoauszug", „Steuerbescheid", „Mahnung") |
+
+Das ist genauso stark wie die Voranhak-Sperre: eine erkannte Mail wird
+höchstens „unklar", nie automatisch „löschen". Zu erkennen ist das am Grund
+„… erkannt — wird deshalb nicht von selbst angehakt" in der Begründung und an
+der Spalte `Typ` in Excel.
+
+**Eng begrenzte Ausnahme vom Kopfzeilen-Prinzip:** Verrät der Betreff nichts,
+liest das Tool für Mails, die sonst automatisch angehakt würden, einen kurzen
+Textausschnitt (die ersten 3 KB) gegen — nur für diese Minderheit, nicht
+pauschal für jede Mail, und weiterhin nur lesend (`BODY.PEEK`). Gesucht wird
+nach Stichworten wie „IBAN", „Rechnungsnummer" oder „Kundennummer". Das ist
+eine einfache Stichwortsuche, kein Parser: verschlüsselte oder rein
+Base64-kodierte Mails liefern keinen Treffer.
+
+Eigene Regeln (`nie`/`immer löschen`) und eindeutig Gelerntes stehen **über**
+der Typ-Erkennung — wer eine Adresse ausdrücklich auf „immer löschen" gesetzt
+hat, weiß das besser als eine Stichwortsuche.
+
+### Das Tool lernt mit
+
+Nach jedem echten Aufräumen merkt sich das Tool pro Absender, was du bestätigt
+und was du bewusst stehen gelassen hast:
+
+- Absender, den du **dreimal gelöscht** und nie behalten hast → wird künftig
+  direkt zum Löschen vorgeschlagen.
+- Absender, den du **zweimal behalten** und nie gelöscht hast → wird künftig
+  gar nicht mehr vorgeschlagen, selbst wenn es ein uralter Newsletter ist.
+
+Gelernt wird nur aus Mails, die überhaupt zur Auswahl standen — über Mails, die
+nie vorgeschlagen wurden, hast du auch nichts entschieden.
+
+```bash
+python mail_cleanup.py gelernt           # anzeigen, was gelernt wurde
+python mail_cleanup.py gelernt --reset   # von vorn anfangen
+```
+
+Gespeichert wird das in `mail_decisions.json` (ebenfalls nicht im Git).
+
+### Sicherheitsnetze
+
+- Beim Durchsuchen wird der Ordner **schreibgeschützt** geöffnet.
+- Unmittelbar vor dem Verschieben prüft das Tool, ob der Ordner noch derselbe
+  ist (`UIDVALIDITY`) und ob hinter jeder Nummer noch dieselbe Mail steckt
+  (`Message-ID`). Passt etwas nicht, wird die Mail übersprungen statt auf gut
+  Glück gelöscht.
+- Eine große Auswahl wird beim echten Lauf automatisch in Portionen von je
+  2000 Mails abgearbeitet, nicht in einem Rutsch — geht bei einer Portion
+  etwas schief, sind nicht gleich alle betroffen, und das Protokoll zeigt es
+  vor der nächsten Portion.
+- Endgültig gelöscht (`EXPUNGE`) wird nur gezielt per UID. Kann der Server das
+  nicht, bleibt das Original lediglich als gelöscht markiert.
+- **Nach** dem Verschieben wird nachgesehen, was tatsächlich verschwunden ist.
+  Als „verschoben" zählt nur, was wirklich weg ist — nicht das, was der Server
+  bloß mit „OK" beantwortet hat.
+
+### Im Mailprogramm ist nichts passiert
+
+Wenn das Aufräumen durchläuft, im Mailprogramm aber alles beim Alten aussieht,
+gibt es drei Erklärungen. Welche zutrifft, zeigt:
+
+```bash
+python mail_cleanup.py diagnose
+```
+
+Im Browser macht das der Knopf **Postfach prüfen** neben dem Konto. Beides liest
+nur und verändert nichts.
+
+**1. Der Server kann Mails nicht verschieben.** Steht in der Ausgabe
+`Server kann MOVE: NEIN` und `Server kann UIDPLUS: NEIN`, dann beherrscht er
+weder `MOVE` noch gezieltes `UID EXPUNGE`. Das Tool kann die Mail dann nur in
+den Papierkorb *kopieren* und im Ordner als gelöscht *markieren* — sie bleibt
+liegen, und viele Mailprogramme zeigen sie ganz normal weiter an. Solche Mails
+erscheinen in der Diagnose in der Spalte „davon gelöscht-markiert" und im
+Ergebnis als **„Nur markiert"**, nicht als verschoben. Das Kopieren in den
+Papierkorb wird dabei selbst noch einmal nachgeprüft (steht dort danach
+wirklich etwas Neues?) — meldet der Server das Kopieren fälschlich als
+Erfolg, obwohl nichts ankam, zeigt das Ergebnis stattdessen **„Noch da"**.
+
+*Was hilft:* im Mailprogramm „Ordner aufräumen" bzw. „Gelöschte endgültig
+entfernen". Ein blankes `EXPUNGE` setzt `clean()` bewusst nicht ab — das würde
+auch Mails endgültig löschen, die man selbst irgendwann mal markiert hat.
+
+Für genau diesen einen Fall gibt es trotzdem einen eigenen, bewusst separaten
+Befehl, der die schon markierten Mails direkt aus dem Tool entfernt:
+
+```bash
+python mail_cleanup.py leeren --account iCloud   # zählt nur, testlauf
+python mail_cleanup.py leeren --account iCloud --execute   # entfernt wirklich
+```
+
+Im Browser erscheint bei „Postfach prüfen" derselbe Knopf, sobald markierte
+Mails gefunden wurden. **Achtung:** Anders als beim normalen Aufräumen gibt es
+hier keine Kopie im Papierkorb — nur bereits markierte Mails werden erfasst
+(es wird nichts neu markiert), aber ihr Entfernen ist endgültig und nicht
+rückgängig zu machen.
+
+**2. Der Papierkorb ist ein anderer Ordner als gedacht.** Nennt der Server
+seinen Papierkorb nicht selbst, rät das Tool über bekannte Namen. Die Diagnose
+schreibt in dem Fall `ÜBER DEN NAMEN GERATEN` dazu. Dann im Mailprogramm
+nachsehen, ob die Mails in dem genannten Ordner gelandet sind.
+
+**3. Das Mailprogramm zeigt einen alten Stand.** Outlook im
+Zwischenspeicher-Modus oder eine lang offene IMAP-Sitzung merken die Änderung
+nicht sofort. Einmal Senden/Empfangen oder das Programm neu starten.
+
+### Gmail-Eigenheiten
+
+Gmail bildet Labels als IMAP-Ordner ab; eine Mail kann daher in mehreren
+Ordnern auftauchen. „Alle Nachrichten" wird bewusst nicht durchsucht.
+Verschieben in den Papierkorb entfernt die Mail bei Gmail aus allen Labels.
+
+## E-Mail suchen: "Wo ist meine Mail hin?"
+
+Eine eigene, vom Aufräumen komplett unabhängige Funktion, um eine bestimmte
+Mail wiederzufinden — im Browser unter **Suchen** (dritter Reiter neben
+Kontakte/E-Mail), auf der Kommandozeile mit `suche`. Rein lesend, verändert
+nichts.
+
+**Der entscheidende Unterschied zum Aufräumen:** Die Suche durchsucht
+absichtlich **alle** Ordner eines Kontos — auch Papierkorb, Spam und
+Entwürfe, die das Aufräumen bewusst ausschließt. Wenn eine Mail „verschwunden"
+ist, aber nicht wirklich weg (endgültig gelöscht wird hier nie etwas), liegt
+sie fast immer genau dort, am häufigsten im **Papierkorb** — etwa weil ein
+früherer Aufräumlauf sie verschoben hat.
+
+```bash
+python mail_cleanup.py suche --von amazon                    # Absender enthält …
+python mail_cleanup.py suche --betreff Rechnung --seit 2024-01-01
+python mail_cleanup.py suche --text "Bestellnummer 4711"     # auch im Mailtext
+python mail_cleanup.py suche --account iCloud --ordner Archiv --von chef
+```
+
+Mindestens ein Kriterium ist Pflicht (Absender, Betreff, Zeitraum oder Text) —
+alles sind einfache Teiltextsuchen ohne Groß-/Kleinschreibung, keine regulären
+Ausdrücke. In der Trefferliste steht auch, ob eine Mail als gelöscht markiert
+ist (`\Deleted`) — genau das Bild, das ein Server ohne `MOVE` hinterlässt
+(siehe „Im Mailprogramm ist nichts passiert" oben).
+
+**Textsuche** liest dafür den Mailtext einzelner Mails gegen (weiterhin nur
+`BODY.PEEK`, nichts wird als gelesen markiert) und ist deshalb langsamer als
+eine reine Kopfzeilensuche — pro Ordner auf die ersten 500 Mails begrenzt,
+die Gesamttrefferliste auf 500 Einträge. Wird das erreicht, meldet das Tool
+das ausdrücklich, statt eine unvollständige Liste kommentarlos zu zeigen.
+
 ## Datenschutzhinweis
 
 - Repository unbedingt **privat** halten
@@ -297,4 +681,8 @@ wurden, und schont Googles Schreib-Quota entsprechend.
 - Die Dateien `.env` und `*.vcf` sind via `.gitignore` vom Commit ausgeschlossen
 - Die Google-OAuth-Client-JSON (`client_secret*.json`) und der gespeicherte
   Google-Token (`.google_token.json`) sind ebenfalls via `.gitignore`
+  ausgeschlossen — niemals committen
+- Die E-Mail-Zugangsdaten (`mail_accounts.json`), der Lernspeicher
+  (`mail_decisions.json`) und die eigenen Regeln (`mail_rules.json`) enthalten
+  Passwörter bzw. Absenderadressen und sind ebenfalls via `.gitignore`
   ausgeschlossen — niemals committen

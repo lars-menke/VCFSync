@@ -397,6 +397,107 @@ def _comparable_from_person(person):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Google-Person -> dasselbe Feld-Dict-Format wie vcard_to_fields() (iCloud) -
+# für contact_check.py, damit dieselbe Prüfung für beide Quellen gilt.
+# ---------------------------------------------------------------------------
+
+# Wie _GOOGLE_TEL_TYPE etc. umgekehrt, aber mit iCloud-Groß-/Kleinschreibung
+# ("Arbeit", nicht "arbeit") - dieselbe Konvention wie bei _TEL_LABELS in
+# icloud_contacts.py, damit ein Label unabhängig von der Quelle gleich aussieht.
+_GOOGLE_TEL_LABEL = {"mobile": "mobil", "home": "privat", "work": "Arbeit"}
+_GOOGLE_EMAIL_LABEL = {"home": "privat", "work": "Arbeit"}
+_GOOGLE_ADR_LABEL = {"home": "privat", "work": "Arbeit"}
+
+
+def _google_label(typ, reverse_map):
+    """Kehrt _google_type() um: Googles Typ zurück in unser Label (mobil/
+    privat/Arbeit), sonst wie beim Schreiben 1:1 übernommen bzw. 'Sonstige'."""
+    t = (typ or "").strip().lower()
+    if t in reverse_map:
+        return reverse_map[t]
+    if t in ("", "other"):
+        return "Sonstige"
+    return typ.strip()
+
+
+def _bday_from_google(person):
+    for b in person.get("birthdays", []):
+        d = b.get("date")
+        if not d:
+            continue
+        if "year" in d:
+            return f"{d['year']:04d}-{d.get('month', 1):02d}-{d.get('day', 1):02d}"
+        return f"--{d.get('month', 1):02d}-{d.get('day', 1):02d}"
+    return ""
+
+
+def person_to_fields(person):
+    """Google-Person-Objekt (aus people.connections.list) in dasselbe Feld-
+    Dict-Format wie vcard_to_fields() - damit contact_check.py unverändert
+    auf beide Quellen anwendbar ist."""
+    n = (person.get("names") or [{}])[0]
+    o = (person.get("organizations") or [{}])[0]
+    bio = (person.get("biographies") or [{}])[0]
+
+    tel = [f"{_google_label(t.get('type'), _GOOGLE_TEL_LABEL)}: {t.get('value', '').strip()}"
+           for t in person.get("phoneNumbers", []) if (t.get("value") or "").strip()]
+    email = [f"{_google_label(e.get('type'), _GOOGLE_EMAIL_LABEL)}: {e.get('value', '').strip()}"
+             for e in person.get("emailAddresses", []) if (e.get("value") or "").strip()]
+    url = [f"{_google_label(u.get('type'), {})}: {u.get('value', '').strip()}"
+           for u in person.get("urls", []) if (u.get("value") or "").strip()]
+    adr = []
+    for a in person.get("addresses", []):
+        pieces = [a.get("streetAddress", ""), a.get("postalCode", ""), a.get("city", ""),
+                 "", a.get("country", "")]
+        flat = " ".join(x.strip() for x in pieces if x and x.strip())
+        if flat:
+            adr.append(f"{_google_label(a.get('type'), _GOOGLE_ADR_LABEL)}: {flat}")
+
+    return {
+        "UID": _extract_vcfsync_uid(person) or person.get("resourceName", ""),
+        "FN": " ".join(x for x in (n.get("givenName", ""), n.get("familyName", "")) if x).strip(),
+        "Nachname": n.get("familyName", "") or "", "Vorname": n.get("givenName", "") or "",
+        "Zusatz": "", "Praefix": n.get("honorificPrefix", "") or "",
+        "Suffix": n.get("honorificSuffix", "") or "",
+        "Nick": (person.get("nicknames") or [{}])[0].get("value", "") or "",
+        "ORG": o.get("name", "") or "", "Abt": o.get("department", "") or "",
+        "Titel": o.get("title", "") or "",
+        "BDAY": _bday_from_google(person),
+        "NOTE": bio.get("value", "") or "", "CAT": "",
+        "TEL": tel, "EMAIL": email, "ADR": adr, "URL": url, "PHOTO_B64": "",
+    }
+
+
+def fetch_contacts_fields(progress=None, interactive=True):
+    """Alle eigenen Google-Kontakte lesen, roh in Feld-Dicts umgewandelt - für
+    die Plausibilitätsprüfung (contact_check.py). Baut sich seine eigene
+    Verbindung auf, unabhängig vom iCloud-/vCard-Sync in diesem Modul.
+
+    interactive=False (z.B. aus der Web-Oberfläche): wirft RuntimeError statt
+    interaktiv nach einer Anmeldung zu fragen, wenn noch kein Token vorliegt.
+
+    Gibt (felder_liste, warnungen) zurück - warnungen ist hier bewusst immer
+    leer (ein einzelner kaputter Kontakt kann die Liste nicht "verlieren",
+    anders als beim iCloud-Einzelabruf je Kontakt); Verbindungsfehler werden
+    stattdessen als Exception nach oben gereicht.
+    """
+    service = build_google_service(interactive=interactive)
+    rows = []
+    page_token = None
+    while True:
+        resp = _execute_with_retry(lambda pt=page_token: service.people().connections().list(
+            resourceName="people/me", pageSize=200, personFields=PERSON_FIELDS, pageToken=pt))
+        for person in resp.get("connections", []):
+            rows.append(person_to_fields(person))
+            if progress:
+                progress(len(rows), len(rows))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return rows, []
+
+
 def _normalize_for_compare(body):
     """Wandelt einen Person-Body in eine ordnungsunabhängige, vergleichbare
     Form um (Listen von dicts werden sortiert), damit z.B. eine von Google

@@ -30,6 +30,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from requests.auth import HTTPBasicAuth
 
+import contact_check
+
 # ---------------------------------------------------------------------------
 # Konstanten
 # ---------------------------------------------------------------------------
@@ -469,6 +471,103 @@ def export_contacts(session, addressbook_urls, embed=True, progress=None):
     }
 
 
+def fetch_contacts_fields(session, addressbook_urls, progress=None):
+    """Lädt alle Kontakte roh (ohne Fotos - die braucht die Plausibilitäts-
+    prüfung nicht) und parst sie direkt in Feld-Dicts. Für 'pruefen'; schreibt
+    nichts, lädt insbesondere keine Foto-Anhänge nach.
+
+    Gibt (felder_liste, warnungen) zurück.
+    """
+    if isinstance(addressbook_urls, str):
+        addressbook_urls = [(addressbook_urls, "")]
+
+    href_map = {}
+    for ab_url, ab_name in addressbook_urls:
+        for href, etag in fetch_all_contact_hrefs(session, ab_url):
+            href_map.setdefault(href, etag)
+    hrefs = list(href_map.items())
+    total = len(hrefs)
+
+    rows, warnings = [], []
+    for i, (href, etag) in enumerate(hrefs, 1):
+        if progress:
+            progress(i, total)
+        try:
+            lines = [l for l in unfold_vcard(fetch_vcard(session, href)) if l.strip()]
+            is_group = any(
+                l.partition(":")[0].split(";")[0].split(".")[-1].upper() == "X-ADDRESSBOOKSERVER-KIND"
+                for l in lines
+            )
+            if not is_group:
+                rows.append(vcard_to_fields(lines))
+        except Exception as e:
+            warnings.append(f"{href} konnte nicht geladen werden: {e}")
+        time.sleep(0.05)  # sanftes Rate-Limiting
+
+    return rows, warnings
+
+
+def cmd_pruefen(args, session, addressbook_urls):
+    """Kontakte live gegen bekannte Inkonsistenzen prüfen - rein lesend,
+    keine Fotos, kein Schreiben. Siehe contact_check.py für die Regeln."""
+    konto = getattr(args, "konto", "icloud")
+    all_rows = []
+
+    if konto in ("icloud", "beide"):
+        if isinstance(addressbook_urls, str):
+            books = [(addressbook_urls, "")]
+        else:
+            books = addressbook_urls
+        print(f"iCloud: durchsuche {len(books)} Adressbuch/Adressbücher ...")
+
+        def progress(i, total):
+            print(f"\r  Prüfe {i}/{total} ...", end="", flush=True)
+
+        rows, warnings = fetch_contacts_fields(session, books, progress=progress)
+        print()
+        for w in warnings:
+            print(f"  WARNUNG: {w}")
+        _print_pruefung(rows, "iCloud")
+        all_rows += rows
+
+    if konto in ("google", "beide"):
+        import google_contacts as gc
+        print("Google: durchsuche Kontakte ...")
+
+        def progress_g(i, total):
+            print(f"\r  Prüfe {i}/{total} ...", end="", flush=True)
+
+        rows_g, warnings_g = gc.fetch_contacts_fields(progress=progress_g)
+        print()
+        for w in warnings_g:
+            print(f"  WARNUNG: {w}")
+        _print_pruefung(rows_g, "Google")
+        all_rows += rows_g
+
+    if getattr(args, "output", None):
+        written, total, _photos = write_contacts_excel(
+            all_rows, args.output, only_flagged=getattr(args, "nur_fehler", False))
+        print(f"\nGespeichert: {args.output} ({written} von {total} Kontakten"
+              + (", nur mit Hinweis/Fehler" if getattr(args, "nur_fehler", False) else "") + ")")
+
+
+def _print_pruefung(rows, quelle):
+    checked = [(d, contact_check.check_contact(d)) for d in rows]
+    by_status = {"ok": 0, "warn": 0, "error": 0}
+    for _d, f in checked:
+        by_status[contact_check.overall_status(f)] += 1
+    print(f"{quelle}: {len(rows)} Kontakte geprüft - {by_status['ok']} OK, "
+          f"{by_status['warn']} mit Hinweis, {by_status['error']} mit Fehler.")
+    for d, findings in checked:
+        if not findings:
+            continue
+        name = d["FN"] or " ".join(x for x in (d["Vorname"], d["Nachname"]) if x) or d["UID"]
+        status = contact_check.overall_status(findings)
+        print(f"  [{contact_check.STATUS_LABELS_DE[status]}] {name}")
+        for f in findings:
+            print(f"      - {f['message']}")
+
+
 def cmd_export(args, session, addressbook_urls):
     output = Path(args.output)
     embed = not getattr(args, "skip_photos", False)
@@ -506,12 +605,19 @@ def cmd_export(args, session, addressbook_urls):
 #   mobil: +49171234567 | Arbeit: +494412345
 # Als Label gelten "mobil", "privat", "Arbeit" (feste Bedeutung) - alles
 # andere wird als eigenes Apple-Label (X-ABLabel) übernommen.
+#
+# "Prüfung"/"Hinweise" stehen nur, wenn export mit --pruefen lief (siehe
+# contact_check.py) - sonst bleiben die Zellen leer. Wie "Löschen" rein
+# informativ/optional: from-excel liest sie nie, ein Reimport ignoriert sie.
 
 EXCEL_COLUMNS = [
-    "UID", "Löschen", "Anzeigename", "Nachname", "Vorname", "Namenszusatz", "Praefix", "Suffix",
-    "Spitzname", "Organisation", "Abteilung", "Titel", "Telefone", "E-Mails",
-    "Adressen", "Geburtstag", "URLs", "Notiz", "Kategorien",
+    "UID", "Löschen", "Prüfung", "Hinweise", "Anzeigename", "Nachname", "Vorname",
+    "Namenszusatz", "Praefix", "Suffix", "Spitzname", "Organisation", "Abteilung",
+    "Titel", "Telefone", "E-Mails", "Adressen", "Geburtstag", "URLs", "Notiz", "Kategorien",
 ]
+# Spalten, die from-excel nie zurückliest (Löschen wird ausgewertet, aber ist
+# in alten Dateien optional; Prüfung/Hinweise sind reine Anzeige).
+_EXCEL_OPTIONAL_COLUMNS = {"Löschen", "Prüfung", "Hinweise"}
 
 # Marker-Property in der vCard: markiert einen Kontakt zum Löschen aus iCloud.
 # Wird beim Import ausgewertet (DELETE statt PUT) und danach ignoriert.
@@ -725,6 +831,75 @@ def changed_fields(old_vcard, new_vcard):
     return out
 
 
+# Zellfarbe je Ampel-Status in der "Prüfung"-Spalte - dieselben Töne wie die
+# Pillen in der Web-Oberfläche (soft, nicht grell), Text bleibt zusätzlich
+# lesbar (Status als Wort, nicht nur als Farbe - auch für Farbenblinde).
+_CHECK_FILLS = {
+    "error": PatternFill("solid", fgColor="F8D7DA"),
+    "warn": PatternFill("solid", fgColor="FFF3CD"),
+    "ok": PatternFill("solid", fgColor="D4EDDA"),
+}
+
+
+def write_contacts_excel(rows, output_path, only_flagged=False):
+    """Schreibt Kontakt-Felddicts (aus vcard_to_fields() oder dem Google-
+    Mapper) als Excel-Datei - inklusive Plausibilitätsprüfung je Kontakt
+    (contact_check.py). only_flagged lässt nur Kontakte mit Hinweis/Fehler
+    stehen (spart das Durchscrollen einer sonst unauffälligen Liste).
+
+    Gibt (geschrieben, gesamt, mit_foto) zurück.
+    """
+    checked = [(d, contact_check.check_contact(d)) for d in rows]
+    total = len(checked)
+    if only_flagged:
+        checked = [(d, f) for d, f in checked if f]
+    checked.sort(key=lambda df: (df[0]["Nachname"] or df[0]["FN"]).lower())
+
+    chunk = 32000  # unter Excels Zellenlimit von 32.767 Zeichen
+    max_chunks = max((math.ceil(len(d["PHOTO_B64"]) / chunk) for d, _f in checked if d["PHOTO_B64"]),
+                     default=1)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Kontakte"
+    header = EXCEL_COLUMNS + [f"Foto_Base64_{i + 1}" for i in range(max_chunks)]
+    ws.append(header)
+    header_fill = PatternFill("solid", fgColor="305496")
+    header_font = Font(bold=True, color="FFFFFF")
+    for col in range(1, len(header) + 1):
+        cell = ws.cell(1, col)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    prüfung_col = EXCEL_COLUMNS.index("Prüfung") + 1
+    for row_i, (d, findings) in enumerate(checked, start=2):
+        status = contact_check.overall_status(findings)
+        photo_chunks = [d["PHOTO_B64"][i:i + chunk] for i in range(0, len(d["PHOTO_B64"]), chunk)]
+        photo_chunks += [""] * (max_chunks - len(photo_chunks))
+        ws.append([
+            d["UID"], "", contact_check.STATUS_LABELS_DE[status], contact_check.notes_text(findings),
+            d["FN"], d["Nachname"], d["Vorname"], d["Zusatz"], d["Praefix"], d["Suffix"],
+            d["Nick"], d["ORG"], d["Abt"], d["Titel"], " | ".join(d["TEL"]), " | ".join(d["EMAIL"]),
+            " | ".join(d["ADR"]), d["BDAY"], " | ".join(d["URL"]), d["NOTE"], d["CAT"],
+        ] + photo_chunks)
+        ws.cell(row_i, prüfung_col).fill = _CHECK_FILLS[status]
+
+    ws.freeze_panes = "E2"  # Zeile 1 + UID/Löschen/Prüfung/Hinweise bleiben beim Scrollen sichtbar
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(EXCEL_COLUMNS))}{len(checked) + 1}"
+    #        UID Lösch Prüf Hinw Anz  Nach Vor  Zus Präf Suf Spitz Org  Abt Tit  Tel E-M Adr BDay URL Notiz Kat
+    widths = [38, 9,   11,  40,  22,  16,  14,  12, 8,   8,  14,   22,  16, 14,  40, 34, 40, 12,  26, 30,   20]
+    for col, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+    for i in range(max_chunks):
+        ws.column_dimensions[get_column_letter(len(EXCEL_COLUMNS) + 1 + i)].width = 40
+    ws.column_dimensions["A"].hidden = True  # UID nicht versehentlich verändern
+
+    wb.save(output_path)
+    photo_count = sum(1 for d, _f in checked if d["PHOTO_B64"])
+    return len(checked), total, photo_count
+
+
 def cmd_to_excel(args):
     text = Path(args.input).read_text(encoding="utf-8")
     cards = split_vcards(text)
@@ -740,46 +915,11 @@ def cmd_to_excel(args):
             continue  # Gruppen ueberspringen - im iPhone ohnehin nicht sichtbar/bearbeitbar
         rows.append(vcard_to_fields(lines))
 
-    rows.sort(key=lambda d: (d["Nachname"] or d["FN"]).lower())
+    written, total, photo_count = write_contacts_excel(
+        rows, args.output, only_flagged=getattr(args, "nur_fehler", False))
 
-    chunk = 32000  # unter Excels Zellenlimit von 32.767 Zeichen
-    max_chunks = max((math.ceil(len(d["PHOTO_B64"]) / chunk) for d in rows if d["PHOTO_B64"]), default=1)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Kontakte"
-    header = EXCEL_COLUMNS + [f"Foto_Base64_{i + 1}" for i in range(max_chunks)]
-    ws.append(header)
-    header_fill = PatternFill("solid", fgColor="305496")
-    header_font = Font(bold=True, color="FFFFFF")
-    for col in range(1, len(header) + 1):
-        cell = ws.cell(1, col)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(vertical="center", wrap_text=True)
-
-    for d in rows:
-        photo_chunks = [d["PHOTO_B64"][i:i + chunk] for i in range(0, len(d["PHOTO_B64"]), chunk)]
-        photo_chunks += [""] * (max_chunks - len(photo_chunks))
-        ws.append([
-            d["UID"], "", d["FN"], d["Nachname"], d["Vorname"], d["Zusatz"], d["Praefix"], d["Suffix"],
-            d["Nick"], d["ORG"], d["Abt"], d["Titel"], " | ".join(d["TEL"]), " | ".join(d["EMAIL"]),
-            " | ".join(d["ADR"]), d["BDAY"], " | ".join(d["URL"]), d["NOTE"], d["CAT"],
-        ] + photo_chunks)
-
-    ws.freeze_panes = "C2"  # Zeile 1 + UID/Löschen bleiben beim Scrollen sichtbar
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(EXCEL_COLUMNS))}{len(rows) + 1}"
-    #        UID Lösch Anz  Nach Vor  Zus Präf Suf Spitz Org  Abt Tit  Tel E-M Adr BDay URL Notiz Kat
-    widths = [38, 9,   22,  16,  14,  12, 8,   8,  14,   22,  16, 14,  40, 34, 40, 12,  26, 30,   20]
-    for col, width in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(col)].width = width
-    for i in range(max_chunks):
-        ws.column_dimensions[get_column_letter(len(EXCEL_COLUMNS) + 1 + i)].width = 40
-    ws.column_dimensions["A"].hidden = True  # UID nicht versehentlich verändern
-
-    wb.save(args.output)
-    photo_count = sum(1 for d in rows if d["PHOTO_B64"])
-    print(f"{len(rows)} Kontakte geschrieben ({photo_count} mit Foto).")
+    print(f"{written} Kontakte geschrieben ({photo_count} mit Foto)."
+          + (f" {total - written} unauffällige übersprungen (--nur-fehler)." if written < total else ""))
     print(f"Gespeichert: {args.output}")
 
 
@@ -957,8 +1097,9 @@ def cmd_from_excel(args):
     col_index = {h: i for i, h in enumerate(header)}
     photo_cols = [h for h in header if h.startswith("Foto_Base64_")]
 
-    # "Löschen" ist optional - alte Excel-Dateien (ohne die Spalte) bleiben gültig.
-    required = [c for c in EXCEL_COLUMNS if c != "Löschen"]
+    # Löschen/Prüfung/Hinweise sind optional - alte Excel-Dateien (ohne diese
+    # Spalten) bleiben gültig.
+    required = [c for c in EXCEL_COLUMNS if c not in _EXCEL_OPTIONAL_COLUMNS]
     missing = [c for c in required if c not in col_index]
     if missing:
         print(f"Fehlende Spalten in {args.input}: {', '.join(missing)}")
@@ -1294,6 +1435,18 @@ def main():
     exp.add_argument("--skip-photos", action="store_true",
                      help="Fotos nicht nachladen/einbetten (nur URL-Verweise, schneller)")
 
+    pruefen = sub.add_parser(
+        "pruefen", help="Kontakte live gegen bekannte Inkonsistenzen prüfen (nur lesend, "
+                        "siehe contact_check.py)")
+    pruefen.add_argument("--konto", choices=["icloud", "google", "beide"], default="icloud",
+                         help="Welches Konto prüfen (Standard: icloud). 'google'/'beide' "
+                              "erfordert vorher 'google-auth'")
+    pruefen.add_argument("--output", metavar="DATEI.xlsx",
+                         help="Zusätzlich als Excel-Datei mit Ampel-Spalten speichern")
+    pruefen.add_argument("--nur-fehler", action="store_true", dest="nur_fehler",
+                         help="In der Excel-Datei nur Kontakte mit Hinweis/Fehler aufnehmen "
+                              "(wirkt nur zusammen mit --output)")
+
     imp = sub.add_parser("import", help="Bearbeitete VCF in iCloud (und/oder Google) zurückspielen")
     imp.add_argument("--input", required=True,
                      help="Zu importierende VCF-Datei")
@@ -1317,6 +1470,9 @@ def main():
     toexcel.add_argument("--input", required=True, help="Quell-VCF-Datei")
     toexcel.add_argument("--output", default="kontakte.xlsx",
                          help="Ziel-Excel-Datei (Standard: kontakte.xlsx)")
+    toexcel.add_argument("--nur-fehler", action="store_true", dest="nur_fehler",
+                         help="Nur Kontakte mit Prüfhinweis/-fehler in die Excel-Datei "
+                              "aufnehmen (siehe 'pruefen')")
 
     fromexcel = sub.add_parser("from-excel", help="Bearbeitete Excel-Liste zurück in VCF wandeln")
     fromexcel.add_argument("--input", required=True, help="Quell-Excel-Datei")
@@ -1350,6 +1506,11 @@ def main():
         cmd_import(args, session=None, books=None, primary_url=None)
         return
 
+    # 'pruefen --konto google' braucht ebenfalls keine iCloud-Anmeldung
+    if args.cmd == "pruefen" and getattr(args, "konto", "icloud") == "google":
+        cmd_pruefen(args, session=None, addressbook_urls=None)
+        return
+
     # Session aufbauen
     user, pw = get_credentials()
     session = requests.Session()
@@ -1380,6 +1541,8 @@ def main():
         if getattr(args, "dry_run", False):
             print("DRY-RUN: Es werden keine Daten gelöscht.")
         cmd_delete(args, session, books)
+    elif args.cmd == "pruefen":
+        cmd_pruefen(args, session, books)
 
 
 if __name__ == "__main__":
