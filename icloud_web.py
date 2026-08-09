@@ -28,6 +28,7 @@ from flask import (Flask, Response, jsonify, render_template_string, request,
                    send_file)
 from requests.auth import HTTPBasicAuth
 
+import contact_check
 import icloud_contacts as ic
 import mail_cleanup as mc
 
@@ -38,6 +39,8 @@ DATA_DIR.mkdir(exist_ok=True)
 EXPORT_VCF = DATA_DIR / "export.vcf"
 EXPORT_XLSX = DATA_DIR / "kontakte.xlsx"
 IMPORT_VCF = DATA_DIR / "import.vcf"
+PRUEFUNG_XLSX = DATA_DIR / "pruefung.xlsx"
+PRUEFUNG_XLSX_FEHLER = DATA_DIR / "pruefung_fehler.xlsx"
 
 # Gemeinsamer Job-Status (nur eine Operation gleichzeitig - reicht für einen Nutzer)
 JOB = {"kind": None, "running": False, "done": 0, "total": 0,
@@ -180,6 +183,61 @@ def _run_import(dry_run, sync_target):
         _job_finish(error=str(e))
 
 
+def _run_pruefen(konto):
+    """Live-Plausibilitätsprüfung ohne Fotos - liest nur, schreibt nichts
+    an die Kontakte. Siehe contact_check.py für die Regeln."""
+    try:
+        raw_rows = []      # unmarkiert, fürs Excel (wie CLI cmd_pruefen)
+        display_rows = []  # mit Quelle, für die Tabelle im Browser
+
+        if konto in ("icloud", "beide"):
+            session, books, _ = build_session()
+            _job_progress(0, 0, "iCloud: Kontaktliste wird geladen ...")
+
+            def progress_ic(i, total):
+                _job_progress(i, total, f"iCloud: Kontakt {i}/{total} ...")
+
+            rows, _warnings = ic.fetch_contacts_fields(session, books, progress=progress_ic)
+            raw_rows += rows
+            display_rows += [(d, "iCloud") for d in rows]
+
+        if konto in ("google", "beide"):
+            import google_contacts as gc
+            offset = len(raw_rows)
+            _job_progress(offset, 0, "Google: Kontaktliste wird geladen ...")
+
+            def progress_g(i, total):
+                _job_progress(offset + i, offset + total, f"Google: Kontakt {i}/{total} ...")
+
+            rows_g, _warnings_g = gc.fetch_contacts_fields(progress=progress_g, interactive=False)
+            raw_rows += rows_g
+            display_rows += [(d, "Google") for d in rows_g]
+
+        ic.write_contacts_excel(raw_rows, PRUEFUNG_XLSX, only_flagged=False)
+        ic.write_contacts_excel(raw_rows, PRUEFUNG_XLSX_FEHLER, only_flagged=True)
+
+        rank = {"error": 0, "warn": 1, "ok": 2}
+        counts = {"ok": 0, "warn": 0, "error": 0}
+        table = []
+        for d, quelle in display_rows:
+            findings = contact_check.check_contact(d)
+            status = contact_check.overall_status(findings)
+            counts[status] += 1
+            name = d["FN"] or " ".join(x for x in (d["Vorname"], d["Nachname"]) if x) or d["UID"]
+            table.append({
+                "name": name, "quelle": quelle, "status": status,
+                "status_label": contact_check.STATUS_LABELS_DE[status],
+                "hinweise": contact_check.notes_text(findings),
+            })
+        table.sort(key=lambda r: (rank[r["status"]], r["name"].lower()))
+
+        _job_finish(result={
+            "kind": "pruefen", "konto": konto, "total": len(table), "counts": counts, "rows": table,
+        })
+    except Exception as e:  # noqa: BLE001
+        _job_finish(error=str(e))
+
+
 def _start(kind, target, *args):
     with JOB_LOCK:
         if JOB["running"]:
@@ -277,6 +335,26 @@ def api_google_status():
         return jsonify({"connected": bool(creds and creds.valid)})
     except Exception:  # noqa: BLE001 - fehlende Anmeldung/Pakete zaehlt als "nicht verbunden"
         return jsonify({"connected": False})
+
+
+@app.route("/api/pruefen", methods=["POST"])
+def api_pruefen():
+    konto = (request.json or {}).get("konto", "icloud")
+    if konto not in ("icloud", "google", "beide"):
+        return jsonify({"error": "Ungültiges Konto."}), 400
+    if not _start("pruefen", _run_pruefen, konto):
+        return jsonify({"error": "Es läuft bereits eine Aufgabe."}), 409
+    return jsonify({"started": True})
+
+
+@app.route("/api/download/pruefung")
+def api_download_pruefung():
+    nur_fehler = request.args.get("nur_fehler") == "1"
+    path = PRUEFUNG_XLSX_FEHLER if nur_fehler else PRUEFUNG_XLSX
+    if not path.exists():
+        return "Noch keine Prüfung vorhanden.", 404
+    name = "kontakte_pruefung_fehler.xlsx" if nur_fehler else "kontakte_pruefung.xlsx"
+    return send_file(path, as_attachment=True, download_name=name)
 
 
 # ---------------------------------------------------------------------------
@@ -984,16 +1062,29 @@ BASE_CSS = """
   .pill-delete { background: #fee2e2; color: var(--color-danger-text); }
   .pill-unsure { background: #fef3c7; color: var(--color-warning-text); }
   .pill-keep { background: var(--color-primary-soft); color: var(--color-primary); }
+  .pill-ok { background: #dcfce7; color: #166534; }
+  .pill-warn { background: #fef3c7; color: var(--color-warning-text); }
+  .pill-error { background: #fee2e2; color: var(--color-danger-text); }
   .pill-type { background: var(--color-surface-2); color: var(--color-text-muted);
                border: 1px solid var(--color-border); }
   @media (prefers-color-scheme: dark) {
     .pill-delete { background: #7f1d1d; }
     .pill-unsure { background: #78350f; }
+    .pill-ok { background: #14532d; }
+    .pill-error { background: #7f1d1d; }
+    .pill-warn { background: #78350f; }
   }
   :root[data-theme="dark"] .pill-delete { background: #7f1d1d; color: #fecaca; }
   :root[data-theme="dark"] .pill-unsure { background: #78350f; color: #fde68a; }
+  :root[data-theme="dark"] .pill-ok { background: #14532d; color: #bbf7d0; }
+  :root[data-theme="dark"] .pill-error { background: #7f1d1d; color: #fecaca; }
+  :root[data-theme="dark"] .pill-warn { background: #78350f; color: #fde68a; }
   :root[data-theme="light"] .pill-delete { background: #fee2e2; color: #b91c1c; }
   :root[data-theme="light"] .pill-unsure { background: #fef3c7; color: #92400e; }
+  :root[data-theme="light"] .pill-ok { background: #dcfce7; color: #166534; }
+  :root[data-theme="light"] .pill-error { background: #fee2e2; color: #b91c1c; }
+  :root[data-theme="light"] .pill-warn { background: #fef3c7; color: #92400e; }
+  .stat-tile.stat-warn { background: var(--color-warning-soft); border-color: var(--color-warning); }
 </style>
 """
 
@@ -1161,6 +1252,49 @@ PAGE = _head("iCloud Kontakte Sync") + """
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-head">
+      <div class="card-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>
+        </svg>
+      </div>
+      <div>
+        <h2>3 · Prüfen</h2>
+        <p class="muted desc">Prüft die Kontakte direkt auf dem Server auf bekannte
+           Inkonsistenzen (z.B. eine Handynummer, die nicht als „mobil" gelabelt ist) -
+           liest nur, verändert nichts.</p>
+      </div>
+    </div>
+
+    <fieldset class="target-group">
+      <legend class="muted">Konto</legend>
+      <label class="target-option">
+        <input type="radio" name="pruefKonto" value="icloud" checked> iCloud
+      </label>
+      <label class="target-option">
+        <input type="radio" name="pruefKonto" value="google" id="pruefGoogle"> Google
+      </label>
+      <label class="target-option">
+        <input type="radio" name="pruefKonto" value="beide" id="pruefBeide"> Beide
+      </label>
+    </fieldset>
+    <p id="pruefGoogleHint" class="muted hidden">
+      Google ist noch nicht verbunden. Einmalig im Terminal:
+      <code>python icloud_contacts.py google-auth</code>
+    </p>
+
+    <button id="btnPruefen" class="btn btn-secondary" onclick="startPruefung()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>
+      </svg>
+      Kontakte prüfen
+    </button>
+
+    <div id="pruefungStatus"></div>
+    <div id="pruefungResult"></div>
+  </div>
+
   <div id="status" aria-live="polite"></div>
 
 </div>
@@ -1244,8 +1378,95 @@ async function checkGoogleStatus(){
       document.getElementById('targetGoogle').disabled = true;
       document.getElementById('targetBoth').disabled = true;
       document.getElementById('googleHint').classList.remove('hidden');
+      document.getElementById('pruefGoogle').disabled = true;
+      document.getElementById('pruefBeide').disabled = true;
+      document.getElementById('pruefGoogleHint').classList.remove('hidden');
     }
   } catch(e){ /* Status ist rein informativ - bei Fehler einfach nichts anzeigen */ }
+}
+
+/* ---------- 3 · Prüfen ----------
+   Läuft über dieselbe geteilte Poll-Schleife wie Export/Import unten (nicht
+   über eine eigene, wie beim "leeren" auf der Mail-Seite) - Prüfen ist hier
+   eine gleichrangige, potenziell länger laufende Aktion dieser Seite und
+   soll deshalb genau wie Export/Import beim Reiterwechsel weiterlaufen und
+   ihr Ergebnis bei Rückkehr noch zeigen. Nur die Anzeige landet in eigenen
+   Boxen (#pruefungStatus/#pruefungResult) statt im geteilten #status. */
+
+function selectedPruefKonto(){
+  const el = document.querySelector('input[name=pruefKonto]:checked');
+  return el ? el.value : 'icloud';
+}
+
+async function startPruefung(){
+  document.getElementById('pruefungStatus').innerHTML = '';
+  document.getElementById('pruefungResult').innerHTML = '';
+  const r = await fetch('/api/pruefen', {method:'POST', headers:{'Content-Type':'application/json'},
+                        body: JSON.stringify({konto: selectedPruefKonto()})});
+  if(r.ok){ setBusy(true); poll(); }
+  else {
+    const j = await r.json();
+    document.getElementById('pruefungStatus').innerHTML = '<p class="l-err">Fehler: '+esc(j.error)+'</p>';
+  }
+}
+
+function renderPruefungStatus(j){
+  const box = document.getElementById('pruefungStatus');
+  if(j.running){
+    setBusy(true);
+    let pct = j.total ? Math.round(j.done/j.total*100) : 0;
+    box.innerHTML = '<div class="status-head">'+ ICONS.spin +
+      '<span class="status-title">Prüfung läuft …</span></div>' +
+      '<p class="muted">'+ esc(j.message||'') +'</p>' +
+      '<div class="progress-track'+(j.total?'':' indeterminate')+'">' +
+      '<progress max="100" value="'+pct+'"></progress></div>';
+    return;
+  }
+  clearInterval(polling); polling = null; setBusy(false);
+  if(j.error){
+    box.innerHTML = '<p class="l-err">Fehler: '+esc(j.error)+'</p>';
+    return;
+  }
+  box.innerHTML = '';
+  if(!j.result || j.result.kind !== 'pruefen') return;
+  renderPruefung(j.result);
+}
+
+function renderPruefung(res){
+  const c = res.counts;
+  const flagged = c.warn + c.error;
+  const box = document.getElementById('pruefungResult');
+
+  let head = '<div class="stat-grid">' +
+    '<div class="stat-tile"><div class="stat-value">'+res.total+'</div><div class="stat-label">Geprüft</div></div>' +
+    '<div class="stat-tile"><div class="stat-value">'+c.ok+'</div><div class="stat-label">OK</div></div>' +
+    '<div class="stat-tile'+(c.warn?' stat-warn':'')+'"><div class="stat-value">'+c.warn+'</div><div class="stat-label">Hinweis</div></div>' +
+    '<div class="stat-tile'+(c.error?' stat-bad':'')+'"><div class="stat-value">'+c.error+'</div><div class="stat-label">Fehler</div></div>' +
+    '</div>';
+
+  let downloads = '<div class="download-row">' +
+    '<a href="/api/download/pruefung" class="btn btn-secondary">Als Excel herunterladen</a>';
+  if(flagged){
+    downloads += ' <a href="/api/download/pruefung?nur_fehler=1" class="btn btn-secondary">' +
+      'Nur Auffällige ('+flagged+') herunterladen</a>';
+  }
+  downloads += '</div>';
+
+  const showQuelle = res.konto === 'beide';
+  let rows = res.rows.length ? (
+    '<div class="diag-table-wrap"><table class="diag-table"><thead><tr>' +
+    (showQuelle ? '<th>Konto</th>' : '') +
+    '<th>Name</th><th>Status</th><th>Hinweise</th></tr></thead><tbody>' +
+    res.rows.map(row =>
+      '<tr' + (row.status !== 'ok' ? ' class="diag-hit"' : '') + '>' +
+      (showQuelle ? '<td>'+esc(row.quelle)+'</td>' : '') +
+      '<td>'+esc(row.name)+'</td>' +
+      '<td><span class="pill pill-'+row.status+'">'+esc(row.status_label)+'</span></td>' +
+      '<td>'+esc(row.hinweise||'')+'</td></tr>').join('') +
+    '</tbody></table></div>'
+  ) : '<p class="muted">Keine Kontakte gefunden.</p>';
+
+  box.innerHTML = head + downloads + rows;
 }
 
 function poll(){
@@ -1263,6 +1484,10 @@ async function refresh(){
   // das nicht auf diese Seite - sonst bleibt hier ein falscher "Import
   // abgeschlossen"/"läuft"-Status stehen, der nie wieder verschwindet, weil
   // diese Seite ihn nicht gestartet hat und ihn deshalb auch nicht abfragt.
+  // "pruefen" gehört zwar zu dieser Seite, zeigt sein Ergebnis aber in den
+  // eigenen Boxen der Karte 3 statt im geteilten #status - eigener Zweig,
+  // damit unten nicht versehentlich in #status geschrieben wird.
+  if(j.kind === 'pruefen'){ renderPruefungStatus(j); return; }
   if(j.kind !== 'export' && j.kind !== 'import'){
     s.innerHTML = ''; clearInterval(polling); polling = null; setBusy(false);
     return;

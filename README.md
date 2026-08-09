@@ -35,6 +35,10 @@ Dann im Browser `http://127.0.0.1:8000` öffnen. Die Oberfläche bietet:
 - **Löschen** — in der Excel-Liste ein `x` in die Spalte `Löschen` setzen; der
   Import entfernt diese Kontakte dann aus iCloud. Der Testlauf zeigt vorher
   deutlich an, wie viele gelöscht würden.
+- **Prüfen** — Kontakte direkt auf iCloud und/oder Google live auf bekannte
+  Inkonsistenzen prüfen (z.B. eine Handynummer, die nicht als „mobil"
+  gelabelt ist), mit Ampel-Anzeige — siehe
+  [Kontakte prüfen: Plausibilitätscheck](#kontakte-prüfen-plausibilitätscheck).
 
 Die App nutzt dieselbe Kernlogik wie das CLI und dieselben Zugangsdaten aus der
 `.env`-Datei bzw. den Umgebungsvariablen.
@@ -193,6 +197,59 @@ Zugangsdaten werden beim ersten Start abgefragt und optional in einer
 ICLOUD_USER=lars@icloud.com
 ICLOUD_PASS=xxxx-xxxx-xxxx-xxxx
 ```
+
+## Kontakte prüfen: Plausibilitätscheck
+
+Prüft Kontakte **live direkt auf iCloud und/oder Google** auf bekannte
+Inkonsistenzen — liest nur, verändert nichts. Gedacht, um vor einem großen
+Aufräumen (siehe oben) schnell zu sehen, wo überhaupt etwas zu tun ist,
+ohne die komplette Liste in Excel durchscrollen zu müssen.
+
+Geprüft wird je Kontakt:
+
+- Telefonnummer sieht nach einer deutschen Handynummer aus (015x/016x/017x),
+  ist aber nicht als „mobil" gelabelt (Fehler).
+- Telefon-Label ist uneindeutig ("Sonstige") (Hinweis).
+- Telefonnummer/E-Mail ist strukturell unplausibel — keine Ziffern, kein `@`
+  usw. (Fehler).
+- Telefonnummer/E-Mail kommt am selben Kontakt doppelt vor (Hinweis).
+- Adresse ohne erkennbare 5-stellige PLZ (Hinweis).
+- Anzeigename vorhanden, aber Vor- und Nachname beide leer (Hinweis).
+
+**In der Web-Oberfläche** (Karte „3 · Prüfen" auf der Kontakte-Seite): Konto
+wählen (iCloud, Google oder beide — Google erfordert vorher einmalig
+`google-auth`, siehe unten), auf „Kontakte prüfen" klicken. Das Ergebnis
+erscheint als Tabelle mit **Ampel-Status** (🟢 OK / 🟡 Hinweis / 🔴 Fehler) je
+Kontakt, dazu Zähler und zwei Downloads: die komplette Liste als Excel, oder
+**nur die auffälligen Kontakte** — spart das Laden der ganzen Datenbank, wenn
+nur wenige Einträge betroffen sind.
+
+**Auf der Kommandozeile:**
+
+```bash
+# iCloud prüfen, Ergebnis nur im Terminal
+python icloud_contacts.py pruefen
+
+# Beide Konten prüfen, zusätzlich als Excel mit Ampel-Farben speichern
+python icloud_contacts.py pruefen --konto beide --output pruefung.xlsx
+
+# Nur die auffälligen Kontakte in die Excel-Datei aufnehmen
+python icloud_contacts.py pruefen --konto beide --output pruefung.xlsx --nur-fehler
+```
+
+Dieselbe Prüfung lässt sich auch auf eine bereits exportierte VCF anwenden,
+ganz ohne Live-Verbindung — `to-excel` unterstützt dieselbe `--nur-fehler`-
+Option:
+
+```bash
+python icloud_contacts.py to-excel --input export.vcf --output kontakte.xlsx --nur-fehler
+```
+
+In der Excel-Datei stehen die Ampel-Spalten `Prüfung` (OK/Hinweis/Fehler,
+farbig hinterlegt) und `Hinweise` (Klartext-Begründung) direkt neben `UID`
+und `Löschen`. Sie sind rein informativ — beim Zurückwandeln mit
+`from-excel` werden sie ignoriert, ein Reimport älterer Excel-Dateien ohne
+diese Spalten funktioniert unverändert weiter.
 
 ## Google Contacts Sync (optional)
 
